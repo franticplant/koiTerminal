@@ -7,3 +7,9 @@ images.tar.gz
 target/
 .DS_Store
 /android/TerminalApp/jniLibs
+.android/
+.kotlin/
+AndroidStudioProject/keystore.jks
+dist/
+dev/keystore.env
+!dev/ctl/Cargo.lock

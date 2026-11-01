@@ -1,0 +1,70 @@
+# The local build environment for koiTerminal (scripts/podman-run).
+# CI does not use it: CI installs the same pinned tools on the runner
+# (.github/actions/setup-build). Both read build/toolchain.lock, so a laptop
+# and CI build with the same versions.
+#
+# Pinned: the base image by digest, downloads by SHA-256 (toolchain.lock), SDK
+# packages by version (sdkmanager checks them against Google's index), Rust by
+# toolchain version. The image tag is a hash of this file, toolchain.lock and
+# install-cargo-tools.sh (scripts/lib/image-tag.sh), so the image is rebuilt
+# only when one of them changes.
+#
+# Caches are not in the image. Cargo's registry, the cargo target directory and
+# Gradle's caches are mounted at /cache by scripts/podman-run.
+
+FROM docker.io/library/debian@sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl unzip git \
+      openjdk-21-jdk-headless \
+      gcc libc6-dev musl-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY toolchain.lock install-cargo-tools.sh /opt/toolchain/
+
+# Android SDK: the command-line tools, then the exact packages the build uses.
+# The pinned NDK and build-tools are reached through fixed symlinks, since ENV
+# cannot read toolchain.lock.
+ENV ANDROID_HOME=/opt/android-sdk
+RUN . /opt/toolchain/toolchain.lock \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/clt.zip "https://dl.google.com/android/repository/${CMDLINE_TOOLS_ZIP}" \
+ && echo "${CMDLINE_TOOLS_SHA256}  /tmp/clt.zip" | sha256sum -c - \
+ && mkdir -p ${ANDROID_HOME}/cmdline-tools \
+ && unzip -q /tmp/clt.zip -d ${ANDROID_HOME}/cmdline-tools \
+ && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+ && rm /tmp/clt.zip \
+ && sdkmanager=${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
+ && (yes | $sdkmanager --licenses > /dev/null) \
+ && $sdkmanager --install "${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK}" \
+ && ln -s ndk/${ANDROID_NDK} ${ANDROID_HOME}/ndk-pinned \
+ && ln -s build-tools/${ANDROID_BUILD_TOOLS} ${ANDROID_HOME}/build-tools-pinned \
+ && rm -rf /root/.android \
+ # sdkmanager unpacks with mode 744; builds run as the invoking user, not root.
+ && chmod -R a+rX ${ANDROID_HOME}
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk-pinned
+ENV PATH=${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/build-tools-pinned:${PATH}
+
+# Rust: the toolchain from toolchain.lock (= rust-toolchain.toml), then the
+# cargo tools from their checked release binaries.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN . /opt/toolchain/toolchain.lock \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain ${RUST_TOOLCHAIN} \
+      --component clippy --component rustfmt \
+      --target aarch64-linux-android --target x86_64-linux-android \
+      --target x86_64-unknown-linux-musl \
+ && rm /tmp/rustup-init \
+ && /opt/toolchain/install-cargo-tools.sh /opt/toolchain/toolchain.lock /opt/cargo/bin
+ENV PATH=/opt/cargo/bin:${PATH}
+
+# At run time the registry lives in a cache volume, not in the image.
+ENV CARGO_HOME=/cache/cargo \
+    CARGO_TARGET_DIR=/cache/target \
+    GRADLE_USER_HOME=/cache/gradle \
+    ANDROID_USER_HOME=/cache/android
+# The rustup proxies are in /opt/cargo/bin; with CARGO_HOME moved they still
+# find the toolchain through RUSTUP_HOME.
+WORKDIR /src

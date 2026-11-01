@@ -17,7 +17,9 @@ if [[ -z "$sdk_home" ]]; then
 fi
 # <!-- UPDATE --> Update SDK version
 if [[ ! -e "tools/android-37-custom.jar" ]]; then
-	wget --progress=dot:mega -O "tools/android-37-custom.jar" "https://github.com/outlawsanzhang/android-hidden-api/releases/download/37.0/android-37-custom.jar"
+	curl -fL --retry 5 --retry-all-errors --progress-bar \
+		-o "tools/android-37-custom.jar" \
+		"https://github.com/outlawsanzhang/android-hidden-api/releases/download/37.0/android-37-custom.jar"
 fi
 ./tools/build_fake_sdk.sh "$sdk_home" "modified_sdk" "tools/android-37-custom.jar"
 echo "sdk.dir=$(readlink -f "$PWD/modified_sdk")" > local.properties
