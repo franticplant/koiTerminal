@@ -143,7 +143,7 @@ adb shell "settings put global hidden_api_blacklist_exemptions 'Landroid/system/
 
 # Don't forget to turn off USB/wireless debugging (and probably developer options too) afterwards.
 ```
-Note that if you installed the GitHub Action auto-built apk, you need to replace `com.android.virtualization.koiterminal` with `com.android.virtualization.koiterminal.githubaction`.
+Note that if you installed the GitHub Action auto-built apk, you need to replace `com.android.virtualization.koiterminal` with `io.github.franticplant.koiterminal`.
 
 For One UI, the above should work too. If it does not, please open an issue.
 You can temporarily use the following alternative that grants ALL APPS a broad range of API usage,

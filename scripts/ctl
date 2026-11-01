@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Builds koi-ctl, the laptop CLI for devd, and puts it in dist/koi-ctl.
+#
+#   scripts/ctl            build for this machine
+#   scripts/ctl --install  also copy it to ~/.local/bin/koi-ctl
+#
+# The binary is built in the pinned container (or on the runner with
+# KOI_HOST_TOOLCHAIN=1), against dev/ctl/Cargo.lock.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+install=false
+[[ ${1:-} == --install ]] && install=true
+
+target=x86_64-unknown-linux-musl
+if [[ ${KOI_HOST_TOOLCHAIN:-} == 1 ]]; then
+	(cd "$repo" && cargo build --release --locked --target "$target" --manifest-path dev/ctl/Cargo.toml)
+	out=$(cd "$repo" && cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+	out=$out/$target/release/koi-ctl
+else
+	"$repo/scripts/run" cargo build --release --locked --target "$target" --manifest-path dev/ctl/Cargo.toml
+	out=${KOI_CACHE_DIR:-$HOME/cache/koiterminal}/target/$target/release/koi-ctl
+fi
+[[ -x $out ]] || { echo "no koi-ctl at $out" >&2; exit 1; }
+
+mkdir -p "$repo/dist"
+cp "$out" "$repo/dist/koi-ctl"
+echo "built dist/koi-ctl"
+if $install; then
+	mkdir -p "$HOME/.local/bin"
+	cp "$out" "$HOME/.local/bin/koi-ctl"
+	echo "installed $HOME/.local/bin/koi-ctl"
+fi

@@ -6,6 +6,12 @@ plugins {
     alias(libs.plugins.protobuf)
 }
 
+// Version. scripts/build passes both from git: KOI_VERSION_CODE grows from the
+// 2026091900 base with commit time, so it never goes backwards; KOI_VERSION_NAME
+// is e.g. "2026091900-g1a2b3c4". A plain Gradle run gets the base version.
+val koiVersionCode = providers.environmentVariable("KOI_VERSION_CODE")
+val koiVersionName = providers.environmentVariable("KOI_VERSION_NAME")
+
 android {
     namespace = "com.android.virtualization.koiterminal"
     compileSdk {
@@ -13,17 +19,35 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.android.virtualization.koiterminal.githubaction"
+        applicationId = "io.github.franticplant.koiterminal"
         minSdk = 37
         targetSdk = 37
-        versionCode = 2026091900
-        versionName = "2026091900"
+        versionCode = koiVersionCode.map { it.toInt() }.getOrElse(2026091900)
+        versionName = koiVersionName.getOrElse("2026091900")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // dev and prod are the same application (same applicationId, same signing
+    // key), so either installs over the other. dev adds the development control
+    // plane: its code lives only in src/dev, so a prod APK does not contain it
+    // at all, and scripts/check-release-apk.sh verifies that.
+    flavorDimensions += "tooling"
+    productFlavors {
+        create("dev") {
+            dimension = "tooling"
+            versionNameSuffix = "-dev"
+            buildConfigField("boolean", "DEV_TOOLS", "true")
+        }
+        create("prod") {
+            dimension = "tooling"
+            buildConfigField("boolean", "DEV_TOOLS", "false")
+        }
+    }
+
     val keystore = rootProject.file("keystore.jks")
-    if (keystore.exists()) {
+    val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
+    if (keystore.exists() && !keystorePassword.isNullOrEmpty()) {
         signingConfigs {
             create("release") {
                 storeFile = keystore
@@ -40,7 +64,7 @@ android {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
             }
-            if (keystore.exists()) {
+            if (keystore.exists() && !keystorePassword.isNullOrEmpty()) {
                 signingConfig = signingConfigs["release"]
             }
         }
@@ -50,6 +74,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
+        buildConfig = true
         compose = true
         aidl = true
     }
@@ -60,6 +85,8 @@ dependencies {
     implementation(project(":libs_android_display_backend"))
     implementation(project(":android_virtualizationservice_aidl"))
     implementation(project(":koiterminal-stubs"))
+    // The development control API, for src/dev only.
+    "devImplementation"(project(":devapi"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

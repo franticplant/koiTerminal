@@ -28,3 +28,7 @@ include(":libs_debian_service")
 include(":koiterminal-stubs")
 include(":libs_android_display_backend")
 include(":android_virtualizationservice_aidl")
+// Development control plane, never part of a prod APK: the shared API
+// definitions and the dev agent package (io.github.franticplant.koiterminal.devd).
+include(":devapi")
+include(":devd")
