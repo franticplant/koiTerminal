@@ -69,6 +69,14 @@ runs:
           ~/.koi-tools
         key: rust-tools-${{ runner.os }}-${{ steps.lock.outputs.hash }}
 
+    - name: musl tools for koi-ctl
+      if: inputs['signing-only'] != 'true'
+      shell: bash
+      run: |
+        . build/toolchain.lock
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends "musl-tools=$MUSL_TOOLS_UBUNTU"
+
     - name: Rust toolchain and cargo tools
       if: inputs['signing-only'] != 'true'
       shell: bash

@@ -23,6 +23,13 @@ class AppGate(
         }
     }
 
+    /** Hold admission while a mutating control operation reserves its transition. */
+    fun <T> control(block: () -> T): T =
+        synchronized(lock) {
+            if (exiting) throw ApiException(ErrorCode.UNAVAILABLE, "the app is exiting")
+            block()
+        }
+
     fun reserveExit() {
         synchronized(lock) {
             if (exiting) throw ApiException(ErrorCode.UNAVAILABLE, "the app is already exiting")

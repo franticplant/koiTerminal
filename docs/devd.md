@@ -84,6 +84,8 @@ koi-ctl -a <phone>:7391 call installer.status
 koi-ctl -a <phone>:7391 call image.info
 koi-ctl -a <phone>:7391 call config.get
 koi-ctl -a <phone>:7391 call ports.setForwarding port=8080 enabled=true
+koi-ctl -a <phone>:7391 call settings.get
+koi-ctl -a <phone>:7391 call settings.set memoryMiB=2048 network=full
 koi-ctl -a <phone>:7391 call app.restart
 koi-ctl -a <phone>:7391 wait vm.status vm.name running --timeout 60
 koi-ctl -a <phone>:7391 logs devd -f

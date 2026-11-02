@@ -50,6 +50,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -72,6 +74,8 @@ object VmController {
     private lateinit var context: Context
     private var serialIO: SerialIOManager? = null
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var startJob: Job? = null
+    @Volatile private var shuttingDown = false
     private val _vmState = LoggingMutableStateFlow<VmState>(MutableStateFlow(VmState.Ready), TAG)
     val vmState: StateFlow<VmState> = _vmState.asStateFlow()
 
@@ -202,7 +206,10 @@ object VmController {
 
     @Synchronized
     fun start() {
-        if (_vmState.value is VmState.Running || _vmState.value is VmState.Starting) return
+        // Stopping and Rebooting are alive too: a start during shutdown would
+        // race the stop that is cancelling/joining the previous startup. The
+        // separate flag covers the window before the state becomes Stopping.
+        if (shuttingDown || _vmState.value.isAlive) return
 
         // Publish the transition before any asynchronous work, so a second
         // caller cannot pass the state check while this one is starting.
@@ -213,7 +220,7 @@ object VmController {
             _vmState.value = VmState.Error(e)
             return
         }
-        repositoryScope.launch {
+        startJob = repositoryScope.launch {
             try {
                 val image = InstalledImage.getDefault(context)
                 val json = ConfigJson.from(context, image.configPath)
@@ -563,19 +570,34 @@ object VmController {
 
     @Synchronized
     fun stop() {
-        if (_vmState.value == VmState.Stopped || _vmState.value == VmState.Stopping) return
+        if (shuttingDown || _vmState.value == VmState.Stopped || _vmState.value == VmState.Stopping)
+            return
 
         // Publish the transition synchronously; the stop itself is asynchronous.
+        shuttingDown = true
         _vmState.value = VmState.Stopping
+        val startup = startJob
+        startJob = null
         repositoryScope.launch {
             try {
-                virtualMachine?.stop()
-            } catch (e: VirtualMachineException) {
-                Log.w("VmController", "Failed to stop VM", e)
+                // A start that is still booting must finish cancelling before we
+                // stop and publish Stopped, or it can resume and replace the state.
+                startup?.cancelAndJoin()
+                try {
+                    virtualMachine?.stop()
+                } catch (e: VirtualMachineException) {
+                    Log.w("VmController", "Failed to stop VM", e)
+                }
+                vmConfig = null
+                vmConfigJson = null
+            } finally {
+                // Publish Stopped before reopening admission, as one critical
+                // section shared with start/stop.
+                synchronized(this@VmController) {
+                    _vmState.value = VmState.Stopped
+                    shuttingDown = false
+                }
             }
-            vmConfig = null
-            vmConfigJson = null
-            _vmState.value = VmState.Stopped
         }
     }
 

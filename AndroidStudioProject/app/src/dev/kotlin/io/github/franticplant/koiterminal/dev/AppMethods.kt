@@ -21,6 +21,8 @@ import com.android.virtualization.koiterminal.new2.core.InstallState
 import com.android.virtualization.koiterminal.new2.core.Installer
 import com.android.virtualization.koiterminal.new2.core.VmController
 import com.android.virtualization.koiterminal.new2.core.VmState
+import com.android.virtualization.koiterminal.new2.ui.main.NetworkConnection
+import com.android.virtualization.koiterminal.new2.ui.main.SettingsViewModel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -35,6 +37,8 @@ class AppMethods(private val app: Application) {
         )
 
     private fun checkRunning() = gate.checkRunning()
+
+    private fun <T> withControl(block: () -> T): T = gate.control(block)
 
     private fun reserveExit() = gate.reserveExit()
 
@@ -200,17 +204,18 @@ class AppMethods(private val app: Application) {
                 mutates = true,
             )
         ) {
-            requireNewUi()
-            checkRunning()
-            when (Installer.installState.value) {
-                is InstallState.Installed -> {}
-                is InstallState.NeedsUpgrade ->
-                    throw ApiException(ErrorCode.FAILED, "the image needs an upgrade first")
-                else ->
-                    throw ApiException(ErrorCode.FAILED, "the image is not installed")
+            withControl {
+                requireNewUi()
+                when (Installer.installState.value) {
+                    is InstallState.Installed -> {}
+                    is InstallState.NeedsUpgrade ->
+                        throw ApiException(ErrorCode.FAILED, "the image needs an upgrade first")
+                    else ->
+                        throw ApiException(ErrorCode.FAILED, "the image is not installed")
+                }
+                VmController.start()
+                vmState(VmController.vmState.value)
             }
-            VmController.start()
-            vmState(VmController.vmState.value)
         }
 
         table.add(
@@ -221,9 +226,11 @@ class AppMethods(private val app: Application) {
                 mutates = true,
             )
         ) {
-            requireNewUi()
-            VmController.stop()
-            vmState(VmController.vmState.value)
+            withControl {
+                requireNewUi()
+                VmController.stop()
+                vmState(VmController.vmState.value)
+            }
         }
 
         table.add(
@@ -270,14 +277,15 @@ class AppMethods(private val app: Application) {
                 mutates = true,
             )
         ) {
-            requireNewUi()
-            checkRunning()
-            if (VmController.vmState.value.isAlive)
-                throw ApiException(ErrorCode.FAILED, "stop the VM before installing")
-            if (Installer.installState.value.isStarted())
-                throw ApiException(ErrorCode.FAILED, "an install is already in progress")
-            Installer.install()
-            installState(Installer.installState.value)
+            withControl {
+                requireNewUi()
+                if (VmController.vmState.value.isAlive)
+                    throw ApiException(ErrorCode.FAILED, "stop the VM before installing")
+                if (Installer.installState.value.isStarted())
+                    throw ApiException(ErrorCode.FAILED, "an install is already in progress")
+                Installer.install()
+                installState(Installer.installState.value)
+            }
         }
 
         table.add(
@@ -288,14 +296,15 @@ class AppMethods(private val app: Application) {
                 mutates = true,
             )
         ) {
-            requireNewUi()
-            checkRunning()
-            if (VmController.vmState.value.isAlive)
-                throw ApiException(ErrorCode.FAILED, "stop the VM before upgrading")
-            if (Installer.installState.value.isStarted())
-                throw ApiException(ErrorCode.FAILED, "an install is already in progress")
-            Installer.upgrade()
-            installState(Installer.installState.value)
+            withControl {
+                requireNewUi()
+                if (VmController.vmState.value.isAlive)
+                    throw ApiException(ErrorCode.FAILED, "stop the VM before upgrading")
+                if (Installer.installState.value.isStarted())
+                    throw ApiException(ErrorCode.FAILED, "an install is already in progress")
+                Installer.upgrade()
+                installState(Installer.installState.value)
+            }
         }
 
         table.add(
@@ -400,6 +409,80 @@ class AppMethods(private val app: Application) {
 
         table.add(
             method(
+                "settings.get",
+                Scope.READ,
+                "The app's VM settings as currently stored: memory, network mode, proxy, " +
+                    "keep-awake, display and time sharing.",
+            )
+        ) {
+            val prefs =
+                app.getSharedPreferences(SettingsViewModel.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            settingsJson(prefs)
+        }
+
+        table.add(
+            method(
+                "settings.set",
+                Scope.OPERATE,
+                "Changes allowlisted VM settings (memory, network mode, SOCKS5 delegate, " +
+                    "keep-awake, time sharing). Refused while the VM is alive; changes take " +
+                    "effect on the next start.",
+                mutates = true,
+                int("memoryMiB", "Memory in MiB.", min = 200, max = 16384),
+                io.github.franticplant.koiterminal.dev.api.str(
+                    "network",
+                    "none, full, managed_socks5 or delegate_socks5.",
+                    choices = listOf("none", "full", "managed_socks5", "delegate_socks5"),
+                ),
+                int("socks5Delegate", "SOCKS5 port.", min = 1, max = 65535),
+                io.github.franticplant.koiterminal.dev.api.bool(
+                    "socks5LoopbackOk",
+                    "Allow the SOCKS5 delegate on loopback.",
+                ),
+                io.github.franticplant.koiterminal.dev.api.bool(
+                    "keepAwake",
+                    "Keep the screen awake while the VM runs.",
+                ),
+                io.github.franticplant.koiterminal.dev.api.bool(
+                    "shareTime",
+                    "Share the host time with the guest.",
+                ),
+            )
+        ) { p ->
+            requireNewUi()
+            checkRunning()
+            if (VmController.vmState.value.isAlive)
+                throw ApiException(ErrorCode.FAILED, "stop the VM before changing settings")
+            val prefs =
+                app.getSharedPreferences(SettingsViewModel.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            val edit = prefs.edit()
+            p.intOr("memoryMiB", 0).takeIf { it > 0 }?.let {
+                if (it < SettingsViewModel.MIN_MEMORY_MIB)
+                    throw ApiException(ErrorCode.INVALID_PARAMS, "memoryMiB is too small")
+                edit.putInt(SettingsViewModel.KEY_MEMORY_MIB, it)
+            }
+            if (p.has("network")) {
+                val net = NetworkConnection.valueOf(p.string("network").uppercase())
+                edit.putString(SettingsViewModel.KEY_NETWORK_CONNECTION, net.name)
+            }
+            p.intOr("socks5Delegate", 0).takeIf { it > 0 }?.let {
+                edit.putInt(SettingsViewModel.KEY_SOCKS5_DELEGATE, it)
+            }
+            if (p.has("socks5LoopbackOk"))
+                edit.putBoolean(
+                    SettingsViewModel.KEY_SOCKS5_LOOPBACK_OK,
+                    p.boolOr("socks5LoopbackOk", false),
+                )
+            if (p.has("keepAwake"))
+                edit.putBoolean(SettingsViewModel.KEY_KEEP_AWAKE, p.boolOr("keepAwake", false))
+            if (p.has("shareTime"))
+                edit.putBoolean(SettingsViewModel.KEY_SHARE_TIME, p.boolOr("shareTime", true))
+            edit.apply()
+            settingsJson(prefs).put("restartRequired", true)
+        }
+
+        table.add(
+            method(
                 "app.logs",
                 Scope.READ,
                 "Bounded app-side dev diagnostics (API calls and control actions), not logcat.",
@@ -456,6 +539,22 @@ class AppMethods(private val app: Application) {
             }
         }
     }
+
+    private fun settingsJson(prefs: android.content.SharedPreferences): JSONObject =
+        JSONObject()
+            .put(
+                "memoryMiB",
+                prefs.getInt(SettingsViewModel.KEY_MEMORY_MIB, SettingsViewModel.DEFAULT_MEMORY_MIB)
+            )
+            .put("network", SettingsViewModel.networkConnectionPref(prefs).name.lowercase())
+            .put("socks5Delegate", SettingsViewModel.socks5DelegatePref(prefs))
+            .put("socks5LoopbackOk", SettingsViewModel.socks5LoopbackOkPref(prefs))
+            .put("shareTime", SettingsViewModel.shareTimePref(prefs))
+            .put("keepAwake", prefs.getBoolean(SettingsViewModel.KEY_KEEP_AWAKE, false))
+            .put(
+                "displayResolution",
+                prefs.getString(SettingsViewModel.KEY_DISPLAY_RESOLUTION, "")
+            )
 
     private fun vmState(s: VmState): JSONObject =
         JSONObject().apply {

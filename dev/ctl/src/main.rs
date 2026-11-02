@@ -42,6 +42,8 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
                           guest-image install state and actions
   image                   installed image metadata
   config                  the installed vm_config.json
+  settings [show|set k=v ...]
+                          read or change allowlisted VM settings
   ports                   ports reported by the guest
   wait METHOD FIELD VALUE [--timeout SEC] [k=v ...]
                           poll until a JSON field equals VALUE, e.g.
@@ -146,6 +148,7 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
         "installer" => group(&ctx, "installer", &rest, "status"),
         "image" => show(&ctx, "image.info"),
         "config" => show(&ctx, "config.get"),
+        "settings" => settings_cmd(&ctx, &rest),
         "ports" => show(&ctx, "ports.list"),
         "wait" => wait(&ctx, &rest),
         "doctor" => doctor(&ctx),
@@ -243,6 +246,27 @@ fn pair(ctx: &mut Ctx, args: &[String]) -> Result<ExitCode, String> {
         fmt_time(r["expiresMs"].as_u64().unwrap_or(0))
     );
     Ok(ExitCode::SUCCESS)
+}
+
+fn settings_cmd(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
+    match args.first().map(String::as_str) {
+        None | Some("show") => show(ctx, "settings.get"),
+        Some("set") => {
+            let params = parse_params(&args[1..])?;
+            let mut c = ctx.connect()?;
+            match c.call("settings.set", Value::Object(params)) {
+                Ok(v) => {
+                    print_json(&v);
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
+        Some(other) => Err(format!("settings: unknown action {other} (try: show, set)")),
+    }
 }
 
 fn show(ctx: &Ctx, method: &str) -> Result<ExitCode, String> {
@@ -418,6 +442,12 @@ fn status(ctx: &Ctx) -> Result<ExitCode, String> {
             a["devTools"]
         ),
         Err(e) => println!("koi: {e}"),
+    }
+    if let Ok(s) = c.call("settings.get", json!({})) {
+        println!(
+            "settings: {} MiB · network {} · proxy {} · keep-awake {}",
+            s["memoryMiB"], s["network"], s["socks5Delegate"], s["keepAwake"]
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
