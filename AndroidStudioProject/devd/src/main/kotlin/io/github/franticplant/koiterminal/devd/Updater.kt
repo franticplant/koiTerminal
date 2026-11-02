@@ -34,6 +34,7 @@ class Updater(private val context: Context, private val log: DevdLog) {
     private val prefs = context.getSharedPreferences("installs", Context.MODE_PRIVATE)
 
     private class Upload(val id: String, val file: File, val size: Long, val sha256: String) {
+        val startedMs = System.currentTimeMillis()
         var received = 0L
         val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
         var verified: JSONObject? = null
@@ -85,6 +86,13 @@ class Updater(private val context: Context, private val log: DevdLog) {
         }
         u.digest.update(data)
         u.received += data.size
+        // Chunks are quiet in the access log; one line per upload instead.
+        if (u.received == u.size) {
+            log.info(
+                "update",
+                "upload ${u.id} received: ${u.size} bytes in ${System.currentTimeMillis() - u.startedMs} ms",
+            )
+        }
         return JSONObject().put("received", u.received)
     }
 

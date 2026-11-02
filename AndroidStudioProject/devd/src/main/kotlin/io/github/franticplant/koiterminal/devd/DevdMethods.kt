@@ -333,12 +333,13 @@ class DevdMethods(private val app: DevdApp) {
             method(
                 "update.chunk",
                 Scope.UPDATE,
-                "Appends base64 data at offset (must equal the bytes received so far).",
+                "Appends base64 data at offset (must equal the bytes received so far). Requests " +
+                    "may be pipelined on one connection: they are handled in order.",
                 true,
                 str("uploadId", "From update.begin.", required = true),
                 long("offset", "Byte offset.", required = true, min = 0),
-                str("data", "Base64, at most 1 MiB decoded.", required = true),
-            )
+                str("data", "Base64, at most chunkBytes (from update.begin) decoded.", required = true),
+            ).copy(quiet = true)
         ) { p ->
             app.updater.chunk(p.string("uploadId"), p.long("offset"), p.string("data"))
         }
