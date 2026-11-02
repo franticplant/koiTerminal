@@ -80,40 +80,6 @@ jobs:
           path: dist/koi-ctl
           retention-days: 7
 
-  # The way release.yml builds: in the pinned container, as
-  # scripts/verify-reproducible.sh does. Keeps the release path working, and its
-  # outputs can be compared with a local container build of the same commit.
-  container:
-    name: Build in the release container
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          df -h /
-      - name: Build unsigned APKs and koi-ctl
-        run: |
-          scripts/build all
-          scripts/ctl
-      - name: Collect
-        run: |
-          mkdir -p out
-          cp AndroidStudioProject/app/build/outputs/apk/prod/release/app-prod-release-unsigned.apk out/
-          cp AndroidStudioProject/app/build/outputs/apk/dev/release/app-dev-release-unsigned.apk out/
-          cp AndroidStudioProject/devd/build/outputs/apk/release/devd-release-unsigned.apk out/
-          cp dist/koi-ctl out/
-          git rev-parse HEAD > out/commit
-          (cd out && sha256sum -- *)
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: container-build
-          path: out/
-          retention-days: 7
-
   workflows:
     name: Lint workflows
     runs-on: ubuntu-24.04
