@@ -1,3 +1,74 @@
+# koiTerminal: franticplant fork
+
+> This is a fork of [outlawsanzhang/koiTerminal](https://github.com/outlawsanzhang/koiTerminal).
+> This section describes what the fork adds. The original README follows
+> below, unchanged.
+
+**Status: alpha, developer preview.** Everything upstream does still works.
+The additions below are usable from the command line but still rough, and
+there are no releases of this fork yet.
+
+## What this fork adds
+
+- **A development control plane.** `devd` is a separate agent app that drives
+  koiTerminal's `dev` build over mutually authenticated TLS 1.3. `koi-ctl` is
+  its command-line client for Linux. Each client is approved on the phone,
+  limited to the scopes granted, and its calls are logged on the phone.
+- **VM control through the API** (dev build only): start, stop and restart;
+  status and exit reasons; settings, ports and the image installer; logs and
+  metrics.
+- **Boot profiles.** Push your own kernel, initramfs or disk files to the phone
+  (resumable and checksum-verified), describe a boot in `vm_config.json` form,
+  and boot it without touching the installed image.
+- **A live serial console** from your computer: `koi-ctl console`.
+
+The `prod` build contains none of this, and a release check enforces that.
+
+| Package | What it is |
+|---|---|
+| `io.github.franticplant.koiterminal` (`prod`) | The app as upstream ships it, under this fork's identity |
+| `io.github.franticplant.koiterminal` (`dev`) | The same app plus the signature-protected hook service devd talks to |
+| `io.github.franticplant.koiterminal.devd` | The development agent |
+| `koi-ctl` | Static Linux command-line client |
+
+When installed from this fork, the app's package name is
+`io.github.franticplant.koiterminal`. Use it wherever the upstream
+instructions below say `com.android.virtualization.koiterminal`.
+
+## Security model, briefly
+
+- devd's listener runs only when you start it on the phone. It binds loopback
+  only unless you enable specific interfaces, and turns itself off after a
+  set time (60 minutes by default).
+- A client must be approved on the phone, with a matching pairing code, and
+  is limited to the scopes you grant. Pairings expire.
+- Only apps signed with the same key as devd can expose or use the hook
+  service (a signature-level permission). devd installs only APKs signed with
+  the certificate it was built with.
+
+Details: [`docs/devd.md`](docs/devd.md).
+
+## Building
+
+```sh
+scripts/build all        # app (dev + prod) and devd, unsigned, in a pinned container
+scripts/sign dev         # sign with your local development key
+scripts/sign devd
+scripts/ctl --install    # build koi-ctl
+```
+
+See [BUILD.md](BUILD.md). Releases are built only by CI from tags, and carry
+SBOM and build-provenance attestations
+(`gh attestation verify <file> -R franticplant/koiTerminal`).
+
+## Credits and licence
+
+The upstream koiTerminal is by OutlawSanZhang, licensed under Apache-2.0
+([LICENCE](LICENCE)), and is based on the AOSP/GrapheneOS Linux Terminal app.
+This fork's additions are under the same licence.
+
+---
+
 # koiTerminal
 A more permissive version of the Linux Terminal app with finer VM permission control, forked from the GrapheneOS repo, supporting custom virtual machine images (such as Secureblue). Currently in alpha stage. <!-- UPDATE -->
 
@@ -45,15 +116,6 @@ Once this repo is in a more presentable state (>=3 distros successfully supporte
     - Supporting using the `Block connections without VPN` setting, or denying Network
     - Changing font size :)
     - Booting from installation media using u-boot (instructions to come) <!-- UPDATE -->
-
-## Development control plane (this fork)
-
-The standalone Android Studio build has a separate `devd` package that drives
-the app over mutually authenticated TLS: pairing with scopes, a segmented
-journal, logs, metrics and an updater for the app and for devd itself. The
-phone side has a listener/pairing/package dashboard; the laptop side is
-`koi-ctl`. See [`docs/devd.md`](docs/devd.md) for the pieces, bootstrap and
-security model.
 
 ## Disclaimers
 - Proof-of-concept alpha test-build software, provided AS-IS. Beware of sharp edges, and back up often. You have been warned.
@@ -152,7 +214,7 @@ adb shell "settings put global hidden_api_blacklist_exemptions 'Landroid/system/
 
 # Don't forget to turn off USB/wireless debugging (and probably developer options too) afterwards.
 ```
-Note that if you installed the GitHub Action auto-built apk, you need to replace `com.android.virtualization.koiterminal` with `io.github.franticplant.koiterminal`.
+Note that if you installed the GitHub Action auto-built apk, you need to replace `com.android.virtualization.koiterminal` with `com.android.virtualization.koiterminal.githubaction`.
 
 For One UI, the above should work too. If it does not, please open an issue.
 You can temporarily use the following alternative that grants ALL APPS a broad range of API usage,
@@ -236,7 +298,7 @@ Please see [BUILD.md](BUILD.md).
 
 # Misc
 ### License
-All new files and files from upstream GrapheneOS: released under Apache 2.0. See [LICENCE](LICENCE). See upstream license [NOTICE](NOTICE).
+All new files and files from upstream GrapheneOS: released under Apache 2.0. See [LICENSE](LICENSE). See upstream license [NOTICE](NOTICE).
 
 Folders from Termux: released under the same license as `terminal-view` and `terminal-emulator` directories from Termux (Apache 2.0). See [their LICENCE.md](https://github.com/termux/termux-app/blob/master/LICENCE.md). These include:
 - Files under `android/TerminalApp/java/com/termux`

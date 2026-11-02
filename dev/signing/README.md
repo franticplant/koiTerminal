@@ -6,7 +6,10 @@ digest of the local development key. The private key is
 passwords (also gitignored).
 
 devd compiles the digest into `BuildConfig.PINNED_CERT_SHA256` and refuses to
-install an APK signed by anything else. The release workflow uses the
-certificate in the `release` environment and passes its digest as
-`KOI_CERT_SHA256`; update this file to the release certificate before the
-first public release so the committed default and the release key agree.
+install an APK signed by anything else.
+
+This pin stays the **local development** certificate: local builds sign with
+the local key, and their devd must accept them. Do not replace it with a
+release certificate. Release builds are signed only in CI, with keys that live
+only in the GitHub `release` environment, and take their pin from CI
+(`KOI_CERT_SHA256`), so each devd trusts exactly the key it was built with.
