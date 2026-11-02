@@ -47,11 +47,13 @@ class DevHooksService : Service() {
                     }
                 val reply = methods.table.call(method, params)
                 val error = reply.optJSONObject("error")?.optString("code")
-                DevLog.add(
-                    if (error == null) "info" else "warn",
-                    "api",
-                    "$method -> ${error ?: "ok"}",
-                )
+                if (error != null || methods.table.spec(method)?.quiet != true) {
+                    DevLog.add(
+                        if (error == null) "info" else "warn",
+                        "api",
+                        "$method -> ${error ?: "ok"}",
+                    )
+                }
                 return reply.toString()
             }
         }

@@ -278,26 +278,12 @@ fun LogViewer(app: RemoteDevd) {
     var component by remember { mutableStateOf<String?>(null) }
     var follow by remember { mutableStateOf(true) }
     var problem by remember { mutableStateOf<String?>(null) }
-    var chain by remember { mutableStateOf<JSONObject?>(null) }
-    var chainProblem by remember { mutableStateOf<String?>(null) }
     var generation by remember { mutableStateOf<String?>(null) }
     var revision by remember { mutableIntStateOf(0) }
     var expanded by remember { mutableStateOf(setOf<Long>()) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-
-    fun verify() {
-        chain = null
-        chainProblem = null
-        scope.launch {
-            try {
-                chain = app.call("journal.verify") as? JSONObject
-            } catch (e: Exception) {
-                chainProblem = e.message ?: e.javaClass.simpleName
-            }
-        }
-    }
 
     // Load and poll the chosen source.
     LaunchedEffect(source) {
@@ -307,7 +293,6 @@ fun LogViewer(app: RemoteDevd) {
         expanded = emptySet()
         component = null
         problem = null
-        if (source == LogSource.DEVD || source == LogSource.ACCESS) verify()
         var cursor = 0L
         var first = true
         while (true) {
@@ -433,37 +418,12 @@ fun LogViewer(app: RemoteDevd) {
                 }
             }
         }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "${shown.size} of ${entries.size}",
-                color = Palette.dim,
-                fontSize = 12.sp,
-                modifier = Modifier.weight(1f),
-            )
-            if (source == LogSource.DEVD || source == LogSource.ACCESS) {
-                val c = chain
-                val (label, color) =
-                    when {
-                        c == null -> "checking chain…" to Palette.dim
-                        c.optBoolean("ok") ->
-                            "chain ok · ${c.optLong("entries")} entries" to Palette.ok
-                        else -> "chain broken: ${c.optString("brokenAt")}" to Palette.error
-                    }
-                Text(label, color = color, fontSize = 12.sp)
-                TextButton(onClick = ::verify) { Text("re-check") }
-            }
-        }
-        chainProblem?.let {
-            Text(
-                "chain check: $it",
-                color = Palette.error,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = 8.dp),
-            )
-        }
+        Text(
+            "${shown.size} of ${entries.size}",
+            color = Palette.dim,
+            fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        )
         problem?.let {
             Text(
                 it,

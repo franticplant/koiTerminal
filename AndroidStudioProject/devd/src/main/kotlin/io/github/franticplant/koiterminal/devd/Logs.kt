@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 /**
  * devd's log (listener, pairing, updates, hooks). Entries go to the [Journal], so they persist and
- * are hash-chained, and to logcat.
+ * are segmented, and to logcat.
  */
 class DevdLog(private val journal: Journal) {
     fun log(level: String, component: String, message: String) {

@@ -239,6 +239,7 @@ class Server(private val app: DevdApp) {
         val pairing = app.pairings.find(clientId)
         val client = pairing?.name ?: "unpaired:${clientId.take(12)}"
         var paramNames = raw.keys().asSequence().toList().sorted()
+        var quiet = false
         val reply =
             try {
                 when {
@@ -254,6 +255,7 @@ class Server(private val app: DevdApp) {
                     else -> {
                         val (spec, params) = check(method, raw)
                         paramNames = params.names.sorted()
+                        quiet = spec.quiet
                         authorize(spec, params, pairing)
                         Caller.current.set(pairing)
                         try {
@@ -272,17 +274,21 @@ class Server(private val app: DevdApp) {
                 Reply.error(ErrorCode.INTERNAL, "${e.javaClass.simpleName}: ${e.message}")
             }
         val outcome = reply.optJSONObject("error")?.optString("code") ?: "ok"
-        app.access.add(
-            Access(
-                client,
-                method.take(64),
-                paramNames,
-                outcome,
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0),
-                conn.local,
-                conn.peer,
+        // High-frequency methods are omitted from the access log unless they fail; they log one
+        // summary per upload/attach themselves.
+        if (!quiet || outcome != "ok") {
+            app.access.add(
+                Access(
+                    client,
+                    method.take(64),
+                    paramNames,
+                    outcome,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0),
+                    conn.local,
+                    conn.peer,
+                )
             )
-        )
+        }
         return reply
     }
 

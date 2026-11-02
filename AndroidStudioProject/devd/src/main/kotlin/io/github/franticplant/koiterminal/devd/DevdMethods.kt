@@ -134,7 +134,7 @@ class DevdMethods(private val app: DevdApp) {
                 "devd.logs",
                 Scope.READ,
                 "devd's journal: its log (listener, pairing, updates, hooks) and, with kind=access or " +
-                    "all, the access log. Persistent and hash-chained; oldest first after a cursor.",
+                    "all, the access log. Persistent, segmented and bounded; oldest first after a cursor.",
                 false,
                 long("after", "Entries with seq greater than this (default 0).", min = 0),
                 int("max", "At most this many (default 200).", min = 1, max = 1000),
@@ -242,21 +242,11 @@ class DevdMethods(private val app: DevdApp) {
             method(
                 "journal.head",
                 Scope.READ,
-                "The journal's newest seq and hash. Keep it: a later journal.verify plus a read of " +
-                    "that seq shows whether anything up to it was rewritten or cut.",
+                "The journal's newest seq. Keep it: a later read of that seq shows whether the " +
+                    "journal was cut.",
             )
         ) {
             app.journal.head()
-        }
-
-        table.add(
-            method(
-                "journal.verify",
-                Scope.READ,
-                "Walks the whole hash chain and reports the first break, if any.",
-            )
-        ) {
-            app.journal.verify()
         }
 
         table.add(

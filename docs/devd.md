@@ -123,9 +123,10 @@ all presets. Logs and metrics have their own screens.
 - Every method has a scope (`read`, `read.content`, `operate`, `secrets`,
   `lifecycle`, `scenario`, `update`). Secret parameters additionally need
   `secrets`; values are never logged.
-- The journal is hash-chained. `koi-ctl journal` compares the phone's chain
-  against the anchor this laptop kept last time, so a truncated or rewritten
-  journal is detected.
+- The journal is append-only and segmented: about 8 MiB of JSONL is kept, the
+  newest 2000 entries are also held in memory, and reads stream one segment at
+  a time. High-frequency calls (upload chunks, console reads) are omitted from
+  the per-call access log and log one summary instead.
 - `koi-ctl` pins devd's certificate at pairing. A changed certificate is
   refused unless you explicitly repin.
 

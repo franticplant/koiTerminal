@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /** Owns devd's parts. Each is handed what it needs; none reaches the others through a global. */
 class DevdApp : Application() {
-    /** Persistent and hash-chained: devd's log and the access log. */
+    /** Persistent and segmented: devd's log and the access log. */
     val journal by lazy { Journal(File(filesDir, "journal")) }
     val log by lazy { DevdLog(journal) }
     val access by lazy { AccessLog(journal) }

@@ -15,10 +15,11 @@ class DevdMethodsTest {
     fun catalogCarriesTheCoreSurface() {
         val app = ApplicationProvider.getApplicationContext<DevdApp>()
         val methods = DevdMethods(app)
-        for (name in listOf("devd.info", "methods", "devd.logs", "journal.verify", "packages.list", "update.begin", "update.commit", "app.start", "app.restart")) {
+        for (name in listOf("devd.info", "methods", "devd.logs", "journal.head", "packages.list", "update.begin", "update.commit", "app.start", "app.restart")) {
             val spec = methods.table.spec(name)
             assertTrue("missing $name", spec != null)
         }
+        assertTrue(methods.table.spec("journal.verify") == null)
         assertEquals("read", methods.table.spec("devd.info")!!.scope)
         assertEquals("update", methods.table.spec("update.commit")!!.scope)
         assertEquals("lifecycle", methods.table.spec("app.restart")!!.scope)

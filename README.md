@@ -49,7 +49,7 @@ Once this repo is in a more presentable state (>=3 distros successfully supporte
 ## Development control plane (this fork)
 
 The standalone Android Studio build has a separate `devd` package that drives
-the app over mutually authenticated TLS: pairing with scopes, a hash-chained
+the app over mutually authenticated TLS: pairing with scopes, a segmented
 journal, logs, metrics and an updater for the app and for devd itself. The
 phone side has a listener/pairing/package dashboard; the laptop side is
 `koi-ctl`. See [`docs/devd.md`](docs/devd.md) for the pieces, bootstrap and

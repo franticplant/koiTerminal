@@ -63,13 +63,18 @@ data class Param(
     val max: Long? = null,
 )
 
-/** A method of the dev API. [mutates] is informational: whether calling it changes state. */
+/**
+ * A method of the dev API. [mutates] is informational: whether calling it changes state. [quiet]
+ * methods are not recorded in the per-call access log when they succeed; they log their own
+ * summary instead, because they are called thousands of times (upload chunks, console reads).
+ */
 data class MethodSpec(
     val name: String,
     val scope: String,
     val description: String,
     val params: List<Param> = emptyList(),
     val mutates: Boolean = false,
+    val quiet: Boolean = false,
 ) {
     fun toJson(): JSONObject =
         JSONObject()
@@ -77,6 +82,7 @@ data class MethodSpec(
             .put("scope", scope)
             .put("description", description)
             .put("mutates", mutates)
+            .put("quiet", quiet)
             .put(
                 "params",
                 JSONArray().apply {
@@ -192,6 +198,7 @@ data class MethodSpec(
                 scope = o.getString("scope"),
                 description = o.optString("description"),
                 mutates = o.optBoolean("mutates"),
+                quiet = o.optBoolean("quiet"),
                 params =
                     (0 until ps.length()).map { i ->
                         val p = ps.getJSONObject(i)

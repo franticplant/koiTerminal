@@ -31,8 +31,6 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
   logs [devd|app] [-f] [--level L] [--grep TEXT]
                           read devd's journal or the app's dev log; -f follows it
   update APK...           upload, verify and install builds (app and/or devd)
-  journal                 verify devd's hash-chained journal against the anchor kept here,
-                          then keep the current head as the new anchor
   top [--once]            live RAM/CPU of devd and the koiTerminal app
   vm [status|start|stop|shutdown|reset]
                           VM lifecycle and state
@@ -153,7 +151,6 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
         "wait" => wait(&ctx, &rest),
         "doctor" => doctor(&ctx),
         "update" => update(&ctx, &rest),
-        "journal" => journal(&mut ctx),
         "top" => top(&ctx, rest.iter().any(|a| a == "--once")),
         "forget" => {
             ctx.hosts.pins.remove(&ctx.addr);
@@ -722,68 +719,6 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// Checks devd's journal: the chain must verify on the phone, and the entry
-/// recorded as this laptop's anchor last time must still be there with the
-/// same hash. Then records the current head as the new anchor.
-fn journal(ctx: &mut Ctx) -> Result<ExitCode, String> {
-    let mut c = ctx.connect()?;
-    let v = c.call("journal.verify", json!({})).map_err(|e| e.to_string())?;
-    if v["ok"].as_bool() != Some(true) {
-        println!("BROKEN chain: {}", v["brokenAt"].as_str().unwrap_or("?"));
-        return Ok(ExitCode::FAILURE);
-    }
-    println!("chain ok: {} entries (seq {}..{})", v["entries"], v["firstSeq"], v["lastSeq"]);
-    let anchor =
-        ctx.hosts.pins.get(&ctx.addr).map(|p| p["journalAnchor"].clone()).filter(|a| a.is_object());
-    let mut ok = true;
-    if let Some(a) = anchor {
-        let seq = a["seq"].as_u64().unwrap_or(0);
-        let hash = a["hash"].as_str().unwrap_or("");
-        let first = v["firstSeq"].as_u64().unwrap_or(0);
-        if seq > 0 && seq < first {
-            println!(
-                "anchor seq {seq} is older than the journal's first entry {first} (rotated out); cannot compare"
-            );
-        } else if seq > 0 {
-            let r = c
-                .call("devd.logs", json!({ "after": seq - 1, "max": 1, "kind": "all" }))
-                .map_err(|e| e.to_string())?;
-            match r["entries"].as_array().and_then(|e| e.first()) {
-                Some(e) if e["seq"].as_u64() == Some(seq) && e["hash"].as_str() == Some(hash) => {
-                    println!("anchor seq {seq} matches: nothing up to it was rewritten");
-                }
-                Some(e) if e["seq"].as_u64() == Some(seq) => {
-                    println!(
-                        "MISMATCH: entry {seq} now has hash {}, the anchor says {hash}: the journal was rewritten",
-                        e["hash"].as_str().unwrap_or("?")
-                    );
-                    ok = false;
-                }
-                _ => {
-                    println!("MISSING: entry {seq} (the anchor) is gone: the journal was cut");
-                    ok = false;
-                }
-            }
-        }
-    } else {
-        println!("no anchor yet for {}; recording one", ctx.addr);
-    }
-    if ok {
-        let head = c.call("journal.head", json!({})).map_err(|e| e.to_string())?;
-        if let Some(p) = ctx.hosts.pins.get_mut(&ctx.addr) {
-            p["journalAnchor"] =
-                json!({ "seq": head["seq"], "hash": head["hash"], "atMs": now_ms() });
-        }
-        ctx.hosts.save()?;
-        println!(
-            "new anchor: seq {} {}",
-            head["seq"],
-            head["hash"].as_str().unwrap_or("").get(..16).unwrap_or("")
-        );
-    }
-    Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 fn top(ctx: &Ctx, once: bool) -> Result<ExitCode, String> {

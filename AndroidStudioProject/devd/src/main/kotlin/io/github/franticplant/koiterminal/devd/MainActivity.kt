@@ -441,7 +441,7 @@ class MainActivity : ComponentActivity() {
             }
 
             Text(
-                "API calls and devd's own log are in the Logs tab (persistent, hash-chained).",
+                "API calls and devd's own log are in the Logs tab (persistent, segmented).",
                 style = MaterialTheme.typography.bodySmall,
             )
             var showLicenses by remember { mutableStateOf(false) }

@@ -83,7 +83,6 @@ class UiService : Service() {
                     JournalFilter.of(p.getString("kind")),
                 )
             "journal.head" -> app.journal.head()
-            "journal.verify" -> app.journal.verify()
             "app.call" -> {
                 val reply =
                     app.hooks.call(p.getString("method"), p.optJSONObject("params") ?: JSONObject())

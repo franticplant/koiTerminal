@@ -66,4 +66,14 @@ class ApiTest {
         assertEquals("test.call", back[0].name)
         assertEquals("count", back[0].params[0].name)
     }
+
+    @Test
+    fun quietIsOptionalAndRoundTrips() {
+        val quiet = spec.copy(quiet = true)
+        val back = MethodSpec.parseCatalog(MethodSpec.catalogJson(listOf(quiet)))
+        assertTrue(back[0].quiet)
+
+        val old = JSONObject(spec.toJson().toString()).apply { remove("quiet") }
+        assertFalse(MethodSpec.fromJson(old).quiet)
+    }
 }
