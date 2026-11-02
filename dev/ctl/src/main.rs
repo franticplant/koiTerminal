@@ -23,6 +23,8 @@ use store::{Hosts, Identity};
 
 const DEFAULT_PORT: u16 = 7391;
 const DEVD_PACKAGE: &str = "io.github.franticplant.koiterminal.devd";
+/// update.chunk requests kept in flight; 4 fills a ~3 MiB/s, ~40 ms link.
+const UPDATE_IN_FLIGHT: usize = 4;
 
 const USAGE: &str = "\
 usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
@@ -932,25 +934,39 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             .call("update.begin", json!({ "size": bytes.len(), "sha256": sha }))
             .map_err(|e| e.to_string())?;
         let upload = begin["uploadId"].as_str().ok_or("no uploadId")?.to_string();
-        // Base64 grows by 4/3. devd advertises its decoded cap; keep the
-        // encoded string comfortably under the API's string limit.
-        let chunk = 128 * 1024;
+        // devd advertises its decoded chunk cap; base64 grows by 4/3, so stay
+        // well under the API's string limit whatever it says.
+        let chunk =
+            begin["chunkBytes"].as_u64().unwrap_or(128 * 1024).clamp(4096, 1024 * 1024) as usize;
         let label = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
         let mut progress = Progress::new(label, bytes.len() as u64);
-        let mut off = 0usize;
-        while off < bytes.len() {
-            let end = (off + chunk).min(bytes.len());
-            c.call(
-                "update.chunk",
-                json!({
-                    "uploadId": upload,
-                    "offset": off,
-                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes[off..end]),
-                }),
-            )
-            .map_err(|e| e.to_string())?;
-            off = end;
-            progress.update(off as u64);
+        // Keep a few chunks in flight: waiting for each reply before sending
+        // the next leaves the link idle for a round trip per chunk. devd
+        // handles a connection's requests in order, so offsets still arrive
+        // in sequence; the first error ends the upload.
+        let (mut sent, mut acked, mut in_flight) = (0usize, 0usize, 0usize);
+        while acked < bytes.len() {
+            while sent < bytes.len() && in_flight < UPDATE_IN_FLIGHT {
+                let end = (sent + chunk).min(bytes.len());
+                c.send(
+                    "update.chunk",
+                    json!({
+                        "uploadId": upload,
+                        "offset": sent,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&bytes[sent..end]),
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+                sent = end;
+                in_flight += 1;
+            }
+            let r = c.recv().map_err(|e| e.to_string())?;
+            in_flight -= 1;
+            acked = r["received"]
+                .as_u64()
+                .map(|n| n as usize)
+                .unwrap_or((acked + chunk).min(bytes.len()));
+            progress.update(acked as u64);
         }
         progress.finish(bytes.len() as u64);
         eprintln!("{path}: verifying and installing");
