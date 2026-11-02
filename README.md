@@ -8,6 +8,20 @@
 The additions below are usable from the command line but still rough, and
 there are no releases of this fork yet.
 
+## Why
+
+Working on an Android app usually means leaving ADB switched on. ADB hands
+whoever holds it broad control over the whole phone for as long as it stays
+enabled, and in practice it ties you to a cable or to the same Wi-Fi network.
+
+This fork does it differently. A small agent app, devd, runs on the phone and
+can reach only koiTerminal's development build, nothing else. You approve
+each computer on the phone, choose what it's allowed to do, and the agent
+turns itself off when you're done. There's no need to keep ADB on. And since
+devd speaks ordinary TLS, you can work on the phone remotely, for example
+from your laptop over a private network such as Tailscale, from another room
+or another country.
+
 ## What this fork adds
 
 - **A development control plane.** `devd` is a separate agent app that drives
