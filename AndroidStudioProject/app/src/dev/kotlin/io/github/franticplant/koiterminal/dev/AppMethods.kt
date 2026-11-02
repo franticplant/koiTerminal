@@ -2,21 +2,26 @@ package io.github.franticplant.koiterminal.dev
 
 import android.app.ActivityManager
 import android.net.TrafficStats
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
 import java.io.ByteArrayOutputStream
+import java.io.File
 import com.android.virtualization.koiterminal.Application
 import com.android.virtualization.koiterminal.BuildConfig
 import com.android.virtualization.koiterminal.InstalledImage
 import com.android.virtualization.koiterminal.LauncherActivity
+import com.android.virtualization.koiterminal.SerialConsole
 import io.github.franticplant.koiterminal.dev.api.ApiException
 import io.github.franticplant.koiterminal.dev.api.ErrorCode
 import io.github.franticplant.koiterminal.dev.api.MethodTable
 import io.github.franticplant.koiterminal.dev.api.ProcSelf
 import io.github.franticplant.koiterminal.dev.api.Scope
+import io.github.franticplant.koiterminal.dev.api.bool
 import io.github.franticplant.koiterminal.dev.api.int
 import io.github.franticplant.koiterminal.dev.api.long
 import io.github.franticplant.koiterminal.dev.api.method
+import io.github.franticplant.koiterminal.dev.api.str
 import com.android.virtualization.koiterminal.new2.core.InstallState
 import com.android.virtualization.koiterminal.new2.core.Installer
 import com.android.virtualization.koiterminal.new2.core.VmController
@@ -42,6 +47,14 @@ class AppMethods(private val app: Application) {
 
     private fun reserveExit() = gate.reserveExit()
 
+    private val staging =
+        Staging(File(app.filesDir, "dev/profiles"), vmAlive = { VmController.vmState.value.isAlive })
+
+    private val profiles = Profiles(app, runningProfile = { VmController.runningProfile })
+
+    /** The fd devd writes upload chunks into. */
+    fun openUpload(id: String): ParcelFileDescriptor = staging.open(id)
+
     /** The VM and installer controllers only exist when the new UI is selected. */
     private fun requireNewUi() {
         if (!LauncherActivity.terminalNewuiJetpack(app))
@@ -54,6 +67,8 @@ class AppMethods(private val app: Application) {
     init {
         addRead()
         addOperate()
+        addProfiles()
+        addStaging()
     }
 
     private fun addRead() {
@@ -86,6 +101,8 @@ class AppMethods(private val app: Application) {
             JSONObject()
                 .put("vm", vmState(VmController.vmState.value))
                 .put("install", installState(Installer.installState.value))
+                .put("boot", VmController.bootReport ?: JSONObject.NULL)
+                .put("lastExit", VmController.lastExit ?: JSONObject.NULL)
         }
 
         table.add(
@@ -120,6 +137,87 @@ class AppMethods(private val app: Application) {
             )
         ) { p ->
             VmDiag.read(p.longOr("after", 0), p.intOr("max", 200))
+        }
+
+        table.add(
+            method(
+                "vm.exits",
+                Scope.READ,
+                "Recent VM stops and errors: reason, uptime, boot source and the last console output.",
+                false,
+                int("max", "At most this many, oldest first (default 10).", min = 1, max = 20),
+            )
+        ) { p -> VmController.exitHistory(p.intOr("max", 10)) }
+
+        table.add(
+            method(
+                "console.read",
+                Scope.READ_CONTENT,
+                "Serial console bytes after a cursor, or the newest bytes. Long-polls until there " +
+                    "is output or waitMs passes. Quiet: one log entry per attach, not per read.",
+                false,
+                long("after", "Return bytes after this absolute cursor (default: newest).", min = 0),
+                int("max", "At most this many bytes (default 64 KiB).", min = 1, max = 1024 * 1024),
+                long("waitMs", "Wait up to this long for new bytes (default 15000).", min = 0, max = 25000),
+            ).copy(quiet = true)
+        ) { p ->
+            val after = if (p.has("after")) p.long("after") else null
+            val read =
+                SerialConsole.read(
+                    after,
+                    p.intOr("max", 64 * 1024),
+                    p.longOr("waitMs", 15_000),
+                )
+            if (after == null) DevLog.add("info", "console", "attach at cursor ${read.cursor}")
+            JSONObject()
+                .put("cursor", read.cursor)
+                .put("data", java.util.Base64.getEncoder().encodeToString(read.data))
+                .put("gap", read.gap)
+                .put("start", read.start)
+                .put("end", read.end)
+        }
+
+        table.add(
+            method(
+                "console.write",
+                Scope.GUEST_CONSOLE,
+                "Writes to the serial console. Text by default, or raw bytes with base64=true.",
+                true,
+                str("data", "The bytes, text or base64.", required = true),
+                bool("base64", "Decode data as base64."),
+            )
+        ) { p ->
+            val data = p.string("data")
+            val bytes =
+                if (p.boolOr("base64", false)) {
+                    try {
+                        java.util.Base64.getDecoder().decode(data)
+                    } catch (e: IllegalArgumentException) {
+                        throw ApiException(ErrorCode.INVALID_PARAMS, "data is not base64")
+                    }
+                } else {
+                    data.toByteArray(Charsets.UTF_8)
+                }
+            if (bytes.size > 64 * 1024)
+                throw ApiException(ErrorCode.INVALID_PARAMS, "at most 64 KiB per write")
+            if (!SerialConsole.write(bytes))
+                throw ApiException(ErrorCode.UNAVAILABLE, "the VM serial console is not attached")
+            JSONObject().put("written", bytes.size)
+        }
+
+        table.add(
+            method(
+                "console.info",
+                Scope.READ,
+                "Console ring size, cursor range, and whether a VM is attached.",
+            )
+        ) {
+            val info = SerialConsole.info()
+            JSONObject()
+                .put("capacity", info.capacity)
+                .put("start", info.start)
+                .put("end", info.end)
+                .put("attached", info.attached)
         }
 
         table.add(
@@ -215,20 +313,67 @@ class AppMethods(private val app: Application) {
             method(
                 "vm.start",
                 Scope.OPERATE,
-                "Starts the installed VM image. Returns immediately; poll vm.status for the result.",
+                "Starts the installed VM image, or a boot profile. Returns immediately; poll " +
+                    "vm.status for the result.",
                 mutates = true,
+                str("profile", "Boot profile to use instead of the installed image."),
             )
-        ) {
+        ) { p ->
             withControl {
                 requireNewUi()
-                when (Installer.installState.value) {
-                    is InstallState.Installed -> {}
-                    is InstallState.NeedsUpgrade ->
-                        throw ApiException(ErrorCode.FAILED, "the image needs an upgrade first")
-                    else ->
-                        throw ApiException(ErrorCode.FAILED, "the image is not installed")
+                val boot =
+                    if (p.has("profile")) {
+                        val name = p.string("profile")
+                        profiles.prepare(name).also { profiles.markBooted(name) }
+                    } else {
+                        when (Installer.installState.value) {
+                            is InstallState.Installed -> {}
+                            is InstallState.NeedsUpgrade ->
+                                throw ApiException(ErrorCode.FAILED, "the image needs an upgrade first")
+                            else -> throw ApiException(ErrorCode.FAILED, "the image is not installed")
+                        }
+                        null
+                    }
+                VmController.start(boot)
+                vmState(VmController.vmState.value)
+            }
+        }
+
+        table.add(
+            method(
+                "vm.restart",
+                Scope.OPERATE,
+                "Stops the VM, waits for Stopped, then starts the same source as last time, or " +
+                    "the named profile. Returns immediately after starting.",
+                mutates = true,
+                str("profile", "Boot profile for the new start (default: the last one)."),
+            )
+        ) { p ->
+            withControl {
+                requireNewUi()
+                val boot =
+                    if (p.has("profile")) {
+                        val name = p.string("profile")
+                        profiles.prepare(name).also { profiles.markBooted(name) }
+                    } else {
+                        (VmController.runningProfile ?: VmController.lastProfile)?.let { name ->
+                            if (!profiles.exists(name))
+                                throw ApiException(ErrorCode.NOT_FOUND, "no profile $name")
+                            profiles.prepare(name).also { profiles.markBooted(name) }
+                        }
+                    }
+                if (VmController.vmState.value.isAlive) {
+                    VmController.stop()
+                    val deadline = System.currentTimeMillis() + 30_000
+                    while (VmController.vmState.value.isAlive &&
+                        System.currentTimeMillis() < deadline) {
+                        Thread.sleep(100)
+                    }
+                    if (VmController.vmState.value.isAlive)
+                        throw ApiException(ErrorCode.TIMEOUT, "the VM did not stop within 30s")
                 }
-                VmController.start()
+                VmController.reset()
+                VmController.start(boot)
                 vmState(VmController.vmState.value)
             }
         }
@@ -552,6 +697,164 @@ class AppMethods(private val app: Application) {
                     )
                 }
             }
+        }
+    }
+
+    private fun addProfiles() {
+        table.add(
+            method(
+                "profile.list",
+                Scope.READ,
+                "Boot profiles: names, base, agent, files, size and when each was last booted.",
+            )
+        ) { profiles.list() }
+
+        table.add(
+            method(
+                "profile.get",
+                Scope.READ,
+                "One profile: the raw document, the resolved config, files, and every problem " +
+                    "that would stop it booting.",
+                false,
+                str("name", "Profile name.", required = true),
+            )
+        ) { p -> profiles.get(p.string("name")) }
+
+        table.add(
+            method(
+                "profile.create",
+                Scope.BOOT_CONFIG,
+                "Creates an empty profile. base=none is a whole recipe; base=installed overlays " +
+                    "the installed image's vm_config.json.",
+                true,
+                str("name", "Profile name.", required = true),
+                str("base", "none or installed.", required = true, choices = listOf("none", "installed")),
+            )
+        ) { p -> profiles.create(p.string("name"), p.string("base")) }
+
+        table.add(
+            method(
+                "profile.put",
+                Scope.BOOT_CONFIG,
+                "Replaces the whole profile document with a JSON object.",
+                true,
+                str("name", "Profile name.", required = true),
+                str("json", "The profile document.", required = true),
+            )
+        ) { p -> profiles.put(p.string("name"), p.string("json")) }
+
+        table.add(
+            method(
+                "profile.set",
+                Scope.BOOT_CONFIG,
+                "Sets one config key to a JSON literal; null removes it.",
+                true,
+                str("name", "Profile name.", required = true),
+                str("key", "A vm_config.json key, e.g. memory_mib.", required = true),
+                str("value", "The JSON literal, e.g. 1024, \"ttyS0\", true.", required = true),
+            )
+        ) { p -> profiles.set(p.string("name"), p.string("key"), p.string("value")) }
+
+        table.add(
+            method(
+                "profile.delete",
+                Scope.BOOT_CONFIG,
+                "Deletes a profile and its files. Refused while that profile is running.",
+                true,
+                str("name", "Profile name.", required = true),
+            )
+        ) { p ->
+            profiles.delete(p.string("name"))
+            null
+        }
+    }
+
+    private fun addStaging() {
+        table.add(
+            method(
+                "staging.begin",
+                Scope.BOOT_PUSH,
+                "Starts an upload into a boot profile. devd then writes chunks through openUpload " +
+                    "and the app hashes the finished file itself.",
+                true,
+                str("profile", "Profile name, e.g. k0.", required = true),
+                str("name", "File name inside the profile.", required = true),
+                long("size", "Exact size in bytes.", required = true, min = 1),
+                str("sha256", "The expected SHA-256, hex.", required = true),
+            )
+        ) { p ->
+            checkRunning()
+            staging.begin(
+                p.string("profile"),
+                p.string("name"),
+                p.long("size"),
+                p.string("sha256"),
+            )
+        }
+
+        table.add(
+            method(
+                "staging.status",
+                Scope.BOOT_PUSH,
+                "How far an upload got, from the partial file's length. Used to resume after a " +
+                    "dropped connection or a restart.",
+                false,
+                str("id", "The upload id from staging.begin.", required = true),
+            )
+        ) { p -> staging.status(p.string("id")) }
+
+        table.add(
+            method(
+                "staging.commit",
+                Scope.BOOT_PUSH,
+                "Hashes the finished upload in the app and, on a match, renames it into the profile.",
+                true,
+                str("id", "The upload id from staging.begin.", required = true),
+            )
+        ) { p ->
+            checkRunning()
+            staging.commit(p.string("id"))
+        }
+
+        table.add(
+            method(
+                "staging.abort",
+                Scope.BOOT_PUSH,
+                "Deletes a partial upload.",
+                true,
+                str("id", "The upload id from staging.begin.", required = true),
+            )
+        ) { p ->
+            checkRunning()
+            staging.abort(p.string("id"))
+            null
+        }
+
+        table.add(
+            method(
+                "staging.list",
+                Scope.READ,
+                "Committed files and in-progress uploads in the boot profiles.",
+                false,
+                str("profile", "Only this profile (default: all)."),
+            )
+        ) { p ->
+            staging.list(if (p.has("profile")) p.string("profile") else null)
+        }
+
+        table.add(
+            method(
+                "staging.remove",
+                Scope.BOOT_PUSH,
+                "Deletes one committed file. Refused while the VM is running.",
+                true,
+                str("profile", "Profile name.", required = true),
+                str("name", "File name inside the profile.", required = true),
+            )
+        ) { p ->
+            checkRunning()
+            staging.remove(p.string("profile"), p.string("name"))
+            null
         }
     }
 

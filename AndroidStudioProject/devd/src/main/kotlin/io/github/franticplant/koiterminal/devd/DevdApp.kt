@@ -14,6 +14,7 @@ class DevdApp : Application() {
     val settings by lazy { Settings(this) }
     val pairings by lazy { Pairings(this, log) }
     val hooks by lazy { Hooks(this, log) }
+    val push by lazy { Push(this) }
     val updater by lazy { Updater(this, log) }
     val notifications by lazy { Notifications(this) }
     val methods by lazy { DevdMethods(this) }

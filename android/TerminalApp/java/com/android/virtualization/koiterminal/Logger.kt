@@ -141,21 +141,38 @@ class SerialIOManager(
     private val tag: String
 ) {
     private val serialOutReadingStream = vm.getConsoleOutput()
-    private val serialInWritingStream = try { vm.getConsoleInput() } catch (e: VirtualMachineException) { null }
-    private val writingPfd = serialInStreamToPfd(serialInWritingStream)
-    private val readingPfd = serialOutStreamToPfd(serialOutReadingStream)
-    public fun getSerialInPfd() = writingPfd
-    public fun getSerialOutPfd() = readingPfd
-    @Volatile
-    private var shutdownFlagged = false
+    private val serialInWritingStream =
+        try {
+            vm.getConsoleInput()
+        } catch (e: VirtualMachineException) {
+            null
+        }
+    private val dev = BuildConfig.DEV_TOOLS
+    private val pipes =
+        if (dev) {
+            SerialConsole.attach(serialOutReadingStream, serialInWritingStream, tag)
+        } else {
+            // Prod is unchanged: no ring, no extra threads, no dev API.
+            SerialConsole.Pipes(
+                serialOutStreamToPfd(serialOutReadingStream),
+                serialInStreamToPfd(serialInWritingStream),
+            )
+        }
+
+    @Volatile private var shutdownFlagged = false
+
+    public fun getSerialInPfd() = pipes.input
+
+    public fun getSerialOutPfd() = pipes.output
 
     fun flagForShutdown() {
         shutdownFlagged = true
+        if (dev) SerialConsole.detach()
     }
 
-    fun serialInStreamToPfd(serialIn: OutputStream?): ParcelFileDescriptor? {
+    private fun serialInStreamToPfd(serialIn: OutputStream?): ParcelFileDescriptor? {
         if (serialIn == null) {
-            Log.w(tag, "VM does not support serial serial console input. Ignoring input...")
+            Log.w(tag, "VM does not support serial console input. Ignoring input...")
             return devNullWritingPfd()
         }
         val serialIn = serialIn as FileOutputStream
@@ -164,17 +181,16 @@ class SerialIOManager(
         return serialInPfd
     }
 
-    fun devNullWritingPfd(): ParcelFileDescriptor {
+    private fun devNullWritingPfd(): ParcelFileDescriptor {
         val pipe = ParcelFileDescriptor.createPipe()
         val readEnd = pipe[0]
         val writeEnd = pipe[1]
-
         executor.execute {
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             val readingStream = ParcelFileDescriptor.AutoCloseInputStream(readEnd)
             try {
                 while (!shutdownFlagged) {
-                    val read = readingStream.read(buffer)
+                    readingStream.read(buffer)
                 }
             } catch (e: IOException) {
                 Log.w(tag, "Failed to discard VM serial console input.", e)
@@ -182,25 +198,19 @@ class SerialIOManager(
                 readingStream.close()
             }
         }
-
         return writeEnd
     }
 
-    fun serialOutStreamToPfd(serialOut: InputStream?): ParcelFileDescriptor? {
+    private fun serialOutStreamToPfd(serialOut: InputStream?): ParcelFileDescriptor? {
         if (serialOut == null) {
             Log.w(tag, "VM does not support serial console output. Ignoring output...")
             return devNullReadingPfd()
         }
         val serialOut = serialOut as FileInputStream
-        val serialOutPfd = ParcelFileDescriptor.dup(serialOut.getFD())
-        return serialOutPfd
+        return ParcelFileDescriptor.dup(serialOut.getFD())
     }
 
-    fun devNullReadingPfd(): ParcelFileDescriptor {
-        val pipe = ParcelFileDescriptor.createPipe()
-        val readEnd = pipe[0]
-        return readEnd
-    }
+    private fun devNullReadingPfd(): ParcelFileDescriptor = ParcelFileDescriptor.createPipe()[0]
 
     companion object {
         const val DEFAULT_BUFFER_SIZE = 4096

@@ -121,8 +121,10 @@ all presets. Logs and metrics have their own screens.
 - Pairings are created only by a person on the phone. There is no API method to
   list, add, revoke or reconfigure pairings, and none to change the listener.
 - Every method has a scope (`read`, `read.content`, `operate`, `secrets`,
-  `lifecycle`, `scenario`, `update`). Secret parameters additionally need
-  `secrets`; values are never logged.
+  `lifecycle`, `scenario`, `update`, `boot.push`, `boot.config`,
+  `guest.console`). Secret parameters additionally need `secrets`; values are
+  never logged. `guest.console` is never part of a preset: it is
+  root-equivalent in most guests and is granted explicitly.
 - The journal is append-only and segmented: about 8 MiB of JSONL is kept, the
   newest 2000 entries are also held in memory, and reads stream one segment at
   a time. High-frequency calls (upload chunks, console reads) are omitted from
@@ -130,11 +132,35 @@ all presets. Logs and metrics have their own screens.
 - `koi-ctl` pins devd's certificate at pairing. A changed certificate is
   refused unless you explicitly repin.
 
+## Boot profiles and uploads
+
+A profile is `files/dev/profiles/<name>/profile.json` plus files in the same
+directory. `base: "none"` is a whole recipe; `base: "installed"` is a shallow
+overlay on the installed image's `vm_config.json` (arrays replace, `null`
+removes a key). `agent: "none"` skips the guest agent, ttyd bridge and the
+agent boot timeout, which is what a serial-only smoke test needs. The resolved
+config still parses through the same `ConfigJson` as an installed image.
+
+Uploads do not put file bytes through Binder JSON. `push.begin` asks the app to
+create a partial and return an id; devd receives a write fd with
+`IDevHooks.openUpload`, decodes 1 MiB chunks and `pwrite`s them at their offset.
+The app re-hashes the finished file at commit and only then renames it into the
+profile. Partials and the upload id survive app/devd restarts, so rerunning the
+same `koi-ctl push` resumes or confirms an already committed file. The phone
+records one journal entry at begin/commit/abort, never one per chunk.
+
+The serial console is a neutral base-app tap: one thread drains the VM console
+into a 1 MiB ring for the API and a pipe for the UI, so both can read. Input
+goes through a pipe and a lock, and the UI keeps its existing PFD. The latest
+4 KiB of output is retained for `vm.status.lastExit` after the VM stops.
+
 ## Differences from Veil's devd
 
 - The app being driven is koiTerminal, so the methods are VM-oriented
   (`vm.start`, `vm.stop`, `vm.shutdown`, `vm.resizeTty`, `installer.*`,
-  `ports.list`) rather than SSH sessions.
+  `ports.list`), plus boot profiles (`profile.*`), staged pushes
+  (`push.*`/`staging.*`) and the serial console (`console.*`), rather than SSH
+  sessions.
 - devd's default port is **7391** (Veil uses 7390), so both can run on one
   phone during the transition.
 - The phone UI follows Veil's split: the Compose screen runs in a separate

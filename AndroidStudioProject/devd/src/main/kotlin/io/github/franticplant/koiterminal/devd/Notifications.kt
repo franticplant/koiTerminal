@@ -83,6 +83,26 @@ class Notifications(private val context: Context) {
 
     fun clearPairingRequest() = nm.cancel(PAIRING_ID)
 
+    /** Ongoing upload progress, updated at most twice per second by the caller. */
+    fun push(name: String, received: Long, size: Long) {
+        val pct = if (size > 0) (received * 100 / size).toInt() else 0
+        nm.notify(
+            PUSH_ID,
+            Notification.Builder(context, LISTENER)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("Receiving $name")
+                .setContentText("$pct% · ${mib(received)} of ${mib(size)} MiB")
+                .setContentIntent(openApp())
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build(),
+        )
+    }
+
+    fun clearPush() = nm.cancel(PUSH_ID)
+
+    private fun mib(bytes: Long) = "%.1f".format(bytes / 1024.0 / 1024.0)
+
     /** Android needs a tap for this install (first install of a package, usually). */
     fun confirmInstall(installId: Int, confirm: Intent?) {
         if (confirm == null) return
@@ -110,6 +130,7 @@ class Notifications(private val context: Context) {
         const val ATTENTION = "attention"
         const val LISTENER_ID = 1
         const val PAIRING_ID = 2
+        const val PUSH_ID = 3
         const val INSTALL_ID_BASE = 0x10000
     }
 }

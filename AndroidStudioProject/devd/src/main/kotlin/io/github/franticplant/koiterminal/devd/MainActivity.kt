@@ -92,16 +92,18 @@ class MainActivity : ComponentActivity() {
                                 onClick = { tab = 0 },
                                 text = { Text("Status") },
                             )
-                            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Logs") })
+                            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Boot") })
+                            Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Logs") })
                             Tab(
-                                selected = tab == 2,
-                                onClick = { tab = 2 },
+                                selected = tab == 3,
+                                onClick = { tab = 3 },
                                 text = { Text("Metrics") },
                             )
                         }
                         when (tab) {
                             0 -> Screen(app)
-                            1 -> LogViewer(app)
+                            1 -> BootView(app)
+                            2 -> LogViewer(app)
                             else -> MetricsView(app)
                         }
                     }

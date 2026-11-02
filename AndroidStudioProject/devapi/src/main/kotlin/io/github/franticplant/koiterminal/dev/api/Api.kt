@@ -30,7 +30,28 @@ object Scope {
     /** Uploading and installing builds of koiTerminal packages. */
     const val UPDATE = "update"
 
-    val ALL = listOf(READ, READ_CONTENT, OPERATE, SECRETS, LIFECYCLE, SCENARIO, UPDATE)
+    /** Uploading kernels, initramfs and disks into boot profiles. */
+    const val BOOT_PUSH = "boot.push"
+
+    /** Creating, changing and deleting boot profiles. */
+    const val BOOT_CONFIG = "boot.config"
+
+    /** Typing into the VM's serial console (root-equivalent in most guests). */
+    const val GUEST_CONSOLE = "guest.console"
+
+    val ALL =
+        listOf(
+            READ,
+            READ_CONTENT,
+            OPERATE,
+            SECRETS,
+            LIFECYCLE,
+            SCENARIO,
+            UPDATE,
+            BOOT_PUSH,
+            BOOT_CONFIG,
+            GUEST_CONSOLE,
+        )
 }
 
 /** Parameter types. Values arriving as strings (from a command line) are converted. */
@@ -189,7 +210,7 @@ data class MethodSpec(
 
     companion object {
         /** The longest string parameter accepted. */
-        const val MAX_STRING = 256 * 1024
+        const val MAX_STRING = 2 * 1024 * 1024
 
         fun fromJson(o: JSONObject): MethodSpec {
             val ps = o.optJSONArray("params") ?: JSONArray()

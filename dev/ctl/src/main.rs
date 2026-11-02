@@ -3,15 +3,21 @@
 //! Every operation is a typed method of the dev API (see `koi-ctl methods`);
 //! there is no shell. The connection is TLS 1.3 with this laptop's client
 //! certificate, and devd's certificate is pinned at pairing.
+#![allow(unsafe_code)] // termios/poll for the interactive console; isolated below.
 
 mod conn;
 mod store;
 
+use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use base64::Engine;
 use conn::{Conn, pairing_code, sha256_hex};
 use store::{Hosts, Identity};
 
@@ -31,9 +37,13 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
   logs [devd|app] [-f] [--level L] [--grep TEXT]
                           read devd's journal or the app's dev log; -f follows it
   update APK...           upload, verify and install builds (app and/or devd)
+  push [--profile P] FILE...
+                          upload files into a boot profile, resuming interrupted uploads
   top [--once]            live RAM/CPU of devd and the koiTerminal app
-  vm [status|start|stop|shutdown|reset]
-                          VM lifecycle and state
+  vm [status|start|restart|stop|shutdown|reset|exits]
+                          VM lifecycle, state and exit history
+  console [--dump|--follow]
+                          serial console: interactive (Ctrl-] q detaches), dump or follow
   app [info|start|restart|exits]
                           app process state and lifecycle
   installer [status|install|upgrade|cancel|retry]
@@ -50,7 +60,8 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
   forget                  drop the pinned devd certificate for the address
 
 The address comes from -a, else $KOI_ADDR, else the last one paired with.
-Scopes: read, read.content, operate, secrets, lifecycle, scenario, update.";
+Scopes: read, read.content, operate, secrets, lifecycle, scenario, update,
+        boot.push, boot.config, guest.console.";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -141,7 +152,8 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
             }
         }
         "logs" => logs(&ctx, &rest),
-        "vm" => group(&ctx, "vm", &rest, "status"),
+        "vm" => vm_cmd(&ctx, &rest),
+        "console" => console_cmd(&ctx, &rest),
         "app" => group(&ctx, "app", &rest, "info"),
         "installer" => group(&ctx, "installer", &rest, "status"),
         "image" => show(&ctx, "image.info"),
@@ -151,6 +163,7 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
         "wait" => wait(&ctx, &rest),
         "doctor" => doctor(&ctx),
         "update" => update(&ctx, &rest),
+        "push" => push(&ctx, &rest),
         "top" => top(&ctx, rest.iter().any(|a| a == "--once")),
         "forget" => {
             ctx.hosts.pins.remove(&ctx.addr);
@@ -177,12 +190,22 @@ fn parse_params(args: &[String]) -> Result<Map<String, Value>, String> {
             let v: Value = serde_json::from_str(v).map_err(|e| format!("{k}: bad JSON: {e}"))?;
             m.insert(k.to_string(), v);
         } else if let Some((k, v)) = a.split_once('=') {
-            m.insert(k.to_string(), Value::String(v.to_string()));
+            m.insert(k.to_string(), Value::String(read_value(v)?));
         } else {
             return Err(format!("argument {a:?} is not k=v or k:=JSON"));
         }
     }
     Ok(m)
+}
+
+/// `@path` reads a string from a file; everything else is literal. This makes
+/// `profile.put name=k0 json=@k0.json` possible without shell quoting.
+fn read_value(v: &str) -> Result<String, String> {
+    if let Some(path) = v.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
+    } else {
+        Ok(v.to_string())
+    }
 }
 
 fn print_json(v: &Value) {
@@ -191,10 +214,20 @@ fn print_json(v: &Value) {
 
 fn pair(ctx: &mut Ctx, args: &[String]) -> Result<ExitCode, String> {
     let mut name = client_name();
-    let mut scopes: Vec<String> =
-        ["read", "read.content", "operate", "secrets", "lifecycle", "scenario", "update"]
-            .map(String::from)
-            .to_vec();
+    let mut scopes: Vec<String> = [
+        "read",
+        "read.content",
+        "operate",
+        "secrets",
+        "lifecycle",
+        "scenario",
+        "update",
+        "boot.push",
+        "boot.config",
+        "guest.console",
+    ]
+    .map(String::from)
+    .to_vec();
     let mut repin = false;
     let mut i = 0;
     while i < args.len() {
@@ -286,7 +319,7 @@ fn group(ctx: &Ctx, prefix: &str, args: &[String], default: &str) -> Result<Exit
     }
     let action = args.first().map(String::as_str).unwrap_or(default);
     let allowed = match prefix {
-        "vm" => ["status", "start", "stop", "shutdown", "reset"].as_slice(),
+        "vm" => ["status", "start", "restart", "stop", "shutdown", "reset", "exits"].as_slice(),
         "app" => ["info", "start", "restart", "exits"].as_slice(),
         "installer" => ["status", "install", "upgrade", "cancel", "retry"].as_slice(),
         _ => [].as_slice(),
@@ -596,6 +629,285 @@ fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
+/// A one-line progress bar. The host test covers the formatting; the caller
+/// decides how often to draw it.
+struct Progress {
+    label: String,
+    total: u64,
+    started: Instant,
+    last_draw: Instant,
+    next_pct: u64,
+    tty: bool,
+}
+
+impl Progress {
+    fn new(label: &str, total: u64) -> Progress {
+        let label: String = label.chars().take(20).collect();
+        Progress {
+            label,
+            total,
+            started: Instant::now(),
+            last_draw: Instant::now() - Duration::from_secs(1),
+            next_pct: 0,
+            tty: std::io::stdout().is_terminal(),
+        }
+    }
+
+    fn update(&mut self, done: u64) {
+        if self.tty {
+            if self.last_draw.elapsed() < Duration::from_millis(100) {
+                return;
+            }
+            self.draw(done, false);
+        } else {
+            let pct = done.saturating_mul(100).checked_div(self.total).unwrap_or(100);
+            if pct >= self.next_pct {
+                self.draw(done, false);
+                self.next_pct = (pct / 10 + 1) * 10;
+            }
+        }
+    }
+
+    fn finish(&mut self, done: u64) {
+        self.draw(done, true);
+    }
+
+    fn draw(&mut self, done: u64, final_line: bool) {
+        self.last_draw = Instant::now();
+        let line = format_progress(&self.label, done, self.total, self.started.elapsed());
+        if self.tty {
+            print!("\r{line}\x1b[K");
+            if final_line {
+                println!();
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        } else {
+            println!("{line}");
+        }
+    }
+}
+
+fn format_progress(label: &str, done: u64, total: u64, elapsed: Duration) -> String {
+    let pct = done.saturating_mul(100).checked_div(total).unwrap_or(100);
+    let width = 20usize;
+    let filled = ((pct as usize) * width / 100).min(width);
+    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+    let secs = elapsed.as_secs_f64();
+    let rate = if secs > 0.0 { done as f64 / secs } else { 0.0 };
+    let eta = if rate > 0.0 {
+        let left = total.saturating_sub(done) as f64 / rate;
+        format!("{}s", left.ceil() as u64)
+    } else {
+        "?".into()
+    };
+    let rate_text = if rate >= 10.0 * 1024.0 * 1024.0 {
+        format!("{:.0} MiB/s", rate / 1024.0 / 1024.0)
+    } else {
+        format!("{:.1} MiB/s", rate / 1024.0 / 1024.0)
+    };
+    format!(
+        "{:<20} [{}] {:3}%  {:.1}/{:.1} MiB  {}  ETA {}",
+        label,
+        bar,
+        pct,
+        done as f64 / 1024.0 / 1024.0,
+        total as f64 / 1024.0 / 1024.0,
+        rate_text,
+        eta
+    )
+}
+
+fn push_key(addr: &str, profile: &str, name: &str, sha256: &str) -> String {
+    format!("{addr}|{profile}|{name}|{sha256}")
+}
+
+fn push_book_path() -> Result<PathBuf, String> {
+    Ok(store::dir()?.join("pushes.json"))
+}
+
+fn load_book(path: &Path) -> Result<Map<String, Value>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Object(m)) => Ok(m),
+            Ok(_) => Err(format!("{}: not a JSON object", path.display())),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        },
+        Err(_) => Ok(Map::new()),
+    }
+}
+
+fn save_book(path: &Path, book: &Map<String, Value>) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(book.clone())).unwrap_or_default();
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn push(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
+    let mut profile = "default".to_string();
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                profile = args.get(i + 1).ok_or("push: --profile needs a value")?.clone();
+                i += 1;
+            }
+            a if a.starts_with('-') => return Err(format!("push: unknown flag {a}")),
+            a => files.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if files.is_empty() {
+        return Err("push needs at least one file".into());
+    }
+    for file in files {
+        push_one(ctx, &profile, &file)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn push_one(ctx: &Ctx, profile: &str, path: &str) -> Result<(), String> {
+    let source = Path::new(path);
+    let meta = std::fs::metadata(source).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a regular file"));
+    }
+    let name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("{path}: no file name"))?
+        .to_string();
+    let size = meta.len();
+    let sha = sha256_file(source)?;
+    let book_path = push_book_path()?;
+    let mut book = load_book(&book_path)?;
+    let key = push_key(&ctx.addr, profile, &name, &sha);
+
+    let mut c = ctx.connect()?;
+    let mut upload_id: Option<String> = None;
+    let mut received = 0u64;
+    if let Some(id) = book.get(&key).and_then(|v| v["uploadId"].as_str()) {
+        match c.call("push.status", json!({ "id": id })) {
+            Ok(s) => {
+                let r = s["received"].as_u64().unwrap_or(0);
+                if s["size"].as_u64() == Some(size)
+                    && s["name"].as_str() == Some(&name)
+                    && r <= size
+                {
+                    received = r;
+                    upload_id = Some(id.to_string());
+                    if r > 0 {
+                        eprintln!("{name}: resuming at {:.1} MiB", r as f64 / 1024.0 / 1024.0);
+                    }
+                } else {
+                    let _ = c.call("push.abort", json!({ "id": id }));
+                }
+            }
+            Err(e) if e.code == "not_found" => {}
+            Err(e) => return Err(format!("{name}: cannot check the previous upload: {e}")),
+        }
+    }
+
+    let chunk_bytes;
+    if upload_id.is_none() {
+        let begin = c
+            .call(
+                "push.begin",
+                json!({ "profile": profile, "name": name, "size": size, "sha256": sha }),
+            )
+            .map_err(|e| format!("{name}: begin failed: {e}"))?;
+        let id = begin["id"].as_str().ok_or("push.begin returned no id")?.to_string();
+        chunk_bytes = begin["chunkBytes"].as_u64().unwrap_or(1024 * 1024) as usize;
+        book.insert(key.clone(), json!({ "uploadId": id, "updatedMs": now_ms() }));
+        save_book(&book_path, &book)?;
+        upload_id = Some(id);
+    } else {
+        chunk_bytes = 1024 * 1024;
+    }
+    let id = upload_id.expect("upload id set above");
+    let already_complete = received == size;
+    let mut progress = Progress::new(&name, size);
+    if !already_complete {
+        progress.update(received);
+    }
+
+    let mut file = std::fs::File::open(source).map_err(|e| format!("{path}: {e}"))?;
+    let mut buf = vec![0u8; chunk_bytes];
+    let mut failures = 0;
+    while received < size {
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(received)).map_err(|e| format!("{path}: {e}"))?;
+        let want = chunk_bytes.min((size - received) as usize);
+        file.read_exact(&mut buf[..want]).map_err(|e| format!("{path}: {e}"))?;
+        let data = base64::engine::general_purpose::STANDARD.encode(&buf[..want]);
+        match c.call("push.chunk", json!({ "id": id, "offset": received, "data": data })) {
+            Ok(v) => {
+                received = v["received"].as_u64().unwrap_or(received + want as u64);
+                failures = 0;
+                progress.update(received);
+            }
+            Err(e) if e.code == "local" => {
+                failures += 1;
+                if failures > 5 {
+                    return Err(format!("{name}: connection lost while uploading: {e}"));
+                }
+                eprintln!("{name}: connection lost; reconnecting and resuming");
+                std::thread::sleep(Duration::from_millis(800));
+                c = ctx.connect()?;
+                let s = c
+                    .call("push.status", json!({ "id": id }))
+                    .map_err(|e| format!("{name}: cannot resume: {e}"))?;
+                received = s["received"].as_u64().unwrap_or(received);
+                progress.update(received);
+            }
+            Err(e) => return Err(format!("{name}: chunk at {received} rejected: {e}")),
+        }
+    }
+
+    let mut commit_failures = 0;
+    let done = loop {
+        match c.call("push.commit", json!({ "id": id })) {
+            Ok(v) => break v,
+            Err(e) if e.code == "local" && commit_failures < 5 => {
+                commit_failures += 1;
+                std::thread::sleep(Duration::from_millis(800));
+                c = ctx.connect()?;
+            }
+            Err(e) => return Err(format!("{name}: commit failed: {e}")),
+        }
+    };
+    if !already_complete {
+        progress.finish(size);
+    }
+    // Keep the upload id: a rerun of the same file should confirm with the app and finish, not
+    // upload it again. A different file hash gets a different key.
+    book.insert(key.clone(), json!({ "uploadId": id, "committed": true, "updatedMs": now_ms() }));
+    save_book(&book_path, &book)?;
+    println!(
+        "{name}: committed {} ({} bytes, sha256 {})",
+        done["path"].as_str().unwrap_or("?"),
+        done["size"].as_u64().unwrap_or(size),
+        done["sha256"].as_str().unwrap_or(&sha)
+    );
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(ctx.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn find_install<'a>(list: &'a Value, install_id: Option<i64>, upload: &str) -> Option<&'a Value> {
     list.as_array().into_iter().flatten().find(|r| {
         if let Some(id) = install_id {
@@ -607,7 +919,6 @@ fn find_install<'a>(list: &'a Value, install_id: Option<i64>, upload: &str) -> O
 }
 
 fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
-    use base64::Engine;
     if apks.is_empty() {
         return Err("update needs at least one APK".into());
     }
@@ -622,8 +933,10 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| e.to_string())?;
         let upload = begin["uploadId"].as_str().ok_or("no uploadId")?.to_string();
         // Base64 grows by 4/3. devd advertises its decoded cap; keep the
-        // encoded string comfortably under the API's 256 KiB string limit.
+        // encoded string comfortably under the API's string limit.
         let chunk = 128 * 1024;
+        let label = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
+        let mut progress = Progress::new(label, bytes.len() as u64);
         let mut off = 0usize;
         while off < bytes.len() {
             let end = (off + chunk).min(bytes.len());
@@ -637,12 +950,10 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             )
             .map_err(|e| e.to_string())?;
             off = end;
+            progress.update(off as u64);
         }
-        eprintln!(
-            "{path}: uploaded {} KiB in {:.1}s; verifying and installing",
-            bytes.len() / 1024,
-            t0.elapsed().as_secs_f64()
-        );
+        progress.finish(bytes.len() as u64);
+        eprintln!("{path}: verifying and installing");
         let commit = c.call("update.commit", json!({ "uploadId": upload }));
         let mut install_id = None;
         let mut self_update = false;
@@ -719,6 +1030,285 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn vm_cmd(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    if !matches!(action, "status" | "start" | "restart" | "stop" | "shutdown" | "reset" | "exits") {
+        return Err(format!(
+            "vm: unknown action {action} (try: status, start, restart, stop, shutdown, reset, exits)"
+        ));
+    }
+    if action == "start" || action == "restart" {
+        let mut profile: Option<String> = None;
+        let mut attach = false;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--profile" => {
+                    profile =
+                        Some(args.get(i + 1).ok_or("vm start: --profile needs a value")?.clone());
+                    i += 2;
+                }
+                "--console" => {
+                    attach = true;
+                    i += 1;
+                }
+                a => return Err(format!("vm {action}: unknown argument {a}")),
+            }
+        }
+        let mut params = Map::new();
+        if let Some(p) = profile {
+            params.insert("profile".into(), Value::String(p));
+        }
+        let mut c = ctx.connect()?;
+        let v =
+            c.call(&format!("vm.{action}"), Value::Object(params)).map_err(|e| e.to_string())?;
+        print_json(&v);
+        if attach {
+            return console_cmd(ctx, &[]);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.len() > 1 {
+        return Err(format!("vm: unexpected argument {:?}", args[1]));
+    }
+    show(ctx, &format!("vm.{action}"))
+}
+
+fn console_cmd(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
+    let mut dump = false;
+    let mut follow = false;
+    for a in args {
+        match a.as_str() {
+            "--dump" => dump = true,
+            "--follow" => follow = true,
+            other => return Err(format!("console: unknown argument {other}")),
+        }
+    }
+    if dump && follow {
+        return Err("console: --dump and --follow are different modes".into());
+    }
+    if dump {
+        return console_dump(ctx);
+    }
+    if follow {
+        let stop = Arc::new(AtomicBool::new(false));
+        let code = console_reader(ctx.addr.clone(), stop)?;
+        return Ok(ExitCode::from(code.clamp(0, 255) as u8));
+    }
+    console_interactive(ctx)
+}
+
+fn console_dump(ctx: &Ctx) -> Result<ExitCode, String> {
+    use base64::Engine;
+    let mut c = ctx.connect()?;
+    let r = c
+        .call("console.read", json!({ "max": 1024 * 1024, "waitMs": 0 }))
+        .map_err(|e| e.to_string())?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(r["data"].as_str().unwrap_or(""))
+        .map_err(|e| format!("console.read returned bad base64: {e}"))?;
+    std::io::stdout().write_all(&data).map_err(|e| format!("stdout: {e}"))?;
+    if !data.ends_with(b"\n") {
+        println!();
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+static SAVED_TERMIOS: AtomicPtr<libc::termios> = AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn restore_on_signal(sig: libc::c_int) {
+    let p = SAVED_TERMIOS.load(Ordering::SeqCst);
+    if !p.is_null() {
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, p);
+        }
+    }
+    unsafe { libc::_exit(128 + sig) }
+}
+
+struct RawTerminal {
+    saved: libc::termios,
+}
+
+impl RawTerminal {
+    fn enable() -> Result<RawTerminal, String> {
+        if !std::io::stdin().is_terminal() {
+            return Err("console needs a terminal; use --dump or --follow".into());
+        }
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut saved) } != 0 {
+            return Err("cannot read the terminal settings".into());
+        }
+        let mut raw = saved;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        // Keep output post-processing so local messages and LF look right.
+        raw.c_oflag |= libc::OPOST;
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
+            return Err("cannot put the terminal in raw mode".into());
+        }
+        let leaked = Box::into_raw(Box::new(saved));
+        SAVED_TERMIOS.store(leaked, Ordering::SeqCst);
+        unsafe {
+            libc::signal(libc::SIGTERM, restore_on_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGHUP, restore_on_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGQUIT, restore_on_signal as *const () as libc::sighandler_t);
+        }
+        Ok(RawTerminal { saved })
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        SAVED_TERMIOS.store(std::ptr::null_mut(), Ordering::SeqCst);
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved);
+        }
+    }
+}
+
+fn vm_alive(status: &Value) -> bool {
+    matches!(status["vm"]["name"].as_str(), Some("starting" | "running" | "stopping" | "rebooting"))
+}
+
+fn console_reader(addr: String, stop: Arc<AtomicBool>) -> Result<i32, String> {
+    use base64::Engine;
+    let mut c = Ctx { addr: addr.clone(), hosts: Hosts::load()? }.connect()?;
+    let mut cursor = 0u64;
+    let mut reconnect = 0;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(0);
+        }
+        let r = match c
+            .call("console.read", json!({ "after": cursor, "max": 64 * 1024, "waitMs": 1000 }))
+        {
+            Ok(v) => v,
+            Err(e) if e.code == "local" && reconnect < 5 => {
+                reconnect += 1;
+                std::thread::sleep(Duration::from_millis(500));
+                c = Ctx { addr: addr.clone(), hosts: Hosts::load()? }.connect()?;
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        reconnect = 0;
+        if r["gap"].as_bool() == Some(true) {
+            let start = r["start"].as_u64().unwrap_or(cursor);
+            let dropped = start.saturating_sub(cursor);
+            print!("\r\n[... {dropped} bytes dropped ...]\r\n");
+        }
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(r["data"].as_str().unwrap_or(""))
+            .map_err(|e| format!("console.read returned bad base64: {e}"))?;
+        if !data.is_empty() {
+            std::io::stdout()
+                .write_all(&data)
+                .and_then(|_| std::io::stdout().flush())
+                .map_err(|e| format!("stdout: {e}"))?;
+        }
+        cursor = r["cursor"].as_u64().unwrap_or(cursor);
+        let status = match c.call("vm.status", json!({})) {
+            Ok(v) => v,
+            Err(e) if e.code == "local" => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        if !vm_alive(&status) {
+            let vm = status["vm"]["name"].as_str().unwrap_or("unknown");
+            let last = &status["lastExit"];
+            if last.is_object() {
+                let name = last["name"].as_str().unwrap_or("UNKNOWN");
+                let reason = last["reason"].as_i64().unwrap_or(-1);
+                let uptime = last["uptimeMs"].as_u64().unwrap_or(0) / 1000;
+                println!("\r\n[vm {vm}: {name} (reason {reason}), up {uptime}s]");
+                return Ok(if name == "SHUTDOWN" { 0 } else { 1 });
+            }
+            println!("\r\n[vm {vm}]");
+            return Ok(if vm == "stopped" { 0 } else { 1 });
+        }
+    }
+}
+
+fn console_interactive(ctx: &Ctx) -> Result<ExitCode, String> {
+    use base64::Engine;
+    let raw = RawTerminal::enable()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_reader = stop.clone();
+    let addr = ctx.addr.clone();
+    let reader = std::thread::spawn(move || console_reader(addr, stop_reader));
+
+    let mut writer = ctx.connect()?;
+    let mut pending = Vec::new();
+    let mut last_send = Instant::now();
+    let mut escape = false;
+    let mut code = 0i32;
+    loop {
+        if reader.is_finished() {
+            break;
+        }
+        let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+        let n = unsafe { libc::poll(&mut pfd, 1, 20) };
+        if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            let mut buf = [0u8; 256];
+            let got = unsafe {
+                libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            };
+            if got <= 0 {
+                stop.store(true, Ordering::SeqCst);
+                break;
+            }
+            for &b in &buf[..got as usize] {
+                if escape {
+                    if b == b'q' {
+                        stop.store(true, Ordering::SeqCst);
+                        escape = false;
+                        break;
+                    }
+                    pending.push(0x1d);
+                    escape = false;
+                }
+                if b == 0x1d {
+                    escape = true;
+                } else {
+                    pending.push(b);
+                }
+            }
+        }
+        if !pending.is_empty()
+            && (pending.len() >= 4096 || last_send.elapsed() >= Duration::from_millis(20))
+        {
+            let data = base64::engine::general_purpose::STANDARD.encode(&pending);
+            match writer.call("console.write", json!({ "data": data, "base64": true })) {
+                Ok(_) => pending.clear(),
+                Err(e) if e.code == "local" => {
+                    writer = ctx.connect()?;
+                }
+                Err(e) => {
+                    eprintln!("console.write: {e}");
+                    pending.clear();
+                }
+            }
+            last_send = Instant::now();
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    if !pending.is_empty() {
+        let data = base64::engine::general_purpose::STANDARD.encode(&pending);
+        let _ = writer.call("console.write", json!({ "data": data, "base64": true }));
+    }
+    stop.store(true, Ordering::SeqCst);
+    if let Ok(result) = reader.join() {
+        match result {
+            Ok(c) => code = c,
+            Err(e) => eprintln!("console: {e}"),
+        }
+    }
+    drop(raw);
+    println!("\r\ndetached");
+    Ok(ExitCode::from(code.clamp(0, 255) as u8))
 }
 
 fn top(ctx: &Ctx, once: bool) -> Result<ExitCode, String> {
@@ -810,6 +1400,40 @@ mod tests {
         assert_eq!(m["keys"], json!(["ctrl+c", "enter"]));
         assert_eq!(m["text"], json!("a=b"));
         assert!(parse_params(&["nope".into()]).is_err());
+    }
+
+    #[test]
+    fn progress_line() {
+        let line = format_progress("vmlinuz-virt", 21_400_000, 41_000_000, Duration::from_secs(6));
+        assert!(line.contains("52%"), "{line}");
+        assert!(line.contains("20.4/39.1 MiB"), "{line}");
+        assert!(line.contains("MiB/s"), "{line}");
+        assert!(line.contains("ETA "), "{line}");
+        let full = format_progress("x", 10, 10, Duration::from_secs(1));
+        assert!(full.contains("100%"), "{full}");
+        assert!(full.contains("ETA 0s"), "{full}");
+    }
+
+    #[test]
+    fn push_book_round_trips() {
+        let dir = std::env::temp_dir().join(format!("koi-push-{}", now_ms()));
+        let path = dir.join("pushes.json");
+        let key = push_key("p8:7390", "k0", "vmlinuz", "abc");
+        let mut book = Map::new();
+        book.insert(key.clone(), json!({ "uploadId": "upload-1" }));
+        save_book(&path, &book).unwrap();
+        let back = load_book(&path).unwrap();
+        assert_eq!(back[&key]["uploadId"], "upload-1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn at_file_values() {
+        let path = std::env::temp_dir().join(format!("koi-arg-{}.json", now_ms()));
+        std::fs::write(&path, "{\"base\":\"none\"}").unwrap();
+        let m = parse_params(&[format!("json=@{}", path.display())]).unwrap();
+        assert_eq!(m["json"], json!("{\"base\":\"none\"}"));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

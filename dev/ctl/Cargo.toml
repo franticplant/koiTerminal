@@ -14,6 +14,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "
 ring = "0.17.14"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 base64 = "0.22.1"
+libc = "0.2"
 
 [lints.rust]
 unsafe_code = "deny"

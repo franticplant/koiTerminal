@@ -23,7 +23,7 @@ pub struct Identity {
     pub key_der: Vec<u8>,
 }
 
-fn dir() -> Result<PathBuf, String> {
+pub fn dir() -> Result<PathBuf, String> {
     if let Ok(d) = std::env::var("KOI_CTL_DIR") {
         return Ok(d.into());
     }

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.DeadObjectException
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import io.github.franticplant.koiterminal.dev.api.ApiException
 import io.github.franticplant.koiterminal.dev.api.DevIds
@@ -136,6 +137,9 @@ class Hooks(private val context: Context, private val log: DevdLog) {
 
     fun call(method: String, params: JSONObject): JSONObject =
         JSONObject(remote { it.call(method, params.toString()) })
+
+    /** A write fd for an upload the app started with staging.begin. */
+    fun openUpload(id: String): ParcelFileDescriptor = remote { it.openUpload(id) }
 
     private fun <T> remote(block: (IDevHooks) -> T): T {
         val b = get()

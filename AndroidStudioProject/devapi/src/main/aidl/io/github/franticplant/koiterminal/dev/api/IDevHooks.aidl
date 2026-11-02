@@ -1,5 +1,7 @@
 package io.github.franticplant.koiterminal.dev.api;
 
+import android.os.ParcelFileDescriptor;
+
 // What the koiTerminal app's dev flavor exposes to the dev agent (devd). JSON in and
 // out: the method catalog and the calls are defined by MethodSpec, so adding a
 // method does not change this interface. Only the signature-protected
@@ -12,4 +14,7 @@ interface IDevHooks {
     // method's spec by the caller and is checked again here. Returns
     // {"result": ...} or {"error": {"code": "...", "message": "..."}}.
     String call(String method, String paramsJson);
+
+    // A write fd for an upload started with staging.begin.
+    ParcelFileDescriptor openUpload(String uploadId);
 }

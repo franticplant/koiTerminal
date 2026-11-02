@@ -97,6 +97,7 @@ class DevdService : Service() {
         AutoOffReceiver.cancel(this)
         app.server.stop()
         app.metrics.stop()
+        app.push.closeAll()
         app.hooks.unbind()
         app._offAtMs.value = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -111,6 +112,7 @@ class DevdService : Service() {
         collector = null
         app.server.stop()
         app.metrics.stop()
+        app.push.closeAll()
         app.hooks.unbind()
         app._offAtMs.value = null
         scope.cancel()

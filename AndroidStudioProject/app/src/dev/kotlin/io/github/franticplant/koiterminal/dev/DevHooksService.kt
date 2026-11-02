@@ -4,6 +4,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import com.android.virtualization.koiterminal.Application
 import io.github.franticplant.koiterminal.dev.api.DevIds
 import io.github.franticplant.koiterminal.dev.api.ErrorCode
@@ -55,6 +56,11 @@ class DevHooksService : Service() {
                     )
                 }
                 return reply.toString()
+            }
+
+            override fun openUpload(uploadId: String): ParcelFileDescriptor {
+                checkCaller()
+                return methods.openUpload(uploadId)
             }
         }
 

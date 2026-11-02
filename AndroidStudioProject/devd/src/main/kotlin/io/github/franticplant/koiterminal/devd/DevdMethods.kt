@@ -240,6 +240,62 @@ class DevdMethods(private val app: DevdApp) {
 
         table.add(
             method(
+                "push.begin",
+                Scope.BOOT_PUSH,
+                "Starts a file upload into a boot profile. Then push.chunk, then push.commit. " +
+                    "The app writes the bytes through a file descriptor and checks the hash.",
+                true,
+                str("profile", "Profile name, e.g. k0.", required = true),
+                str("name", "File name inside the profile.", required = true),
+                long("size", "Exact size in bytes.", required = true, min = 1),
+                str("sha256", "The file's SHA-256, hex.", required = true),
+            )
+        ) { p -> app.push.begin(p) }
+
+        table.add(
+            method(
+                "push.chunk",
+                Scope.BOOT_PUSH,
+                "Writes one 1 MiB chunk at its offset. Repeating an acknowledged chunk is ignored.",
+                true,
+                str("id", "The upload id from push.begin.", required = true),
+                long("offset", "Byte offset of this chunk.", required = true, min = 0),
+                str("data", "The chunk, base64.", required = true),
+            ).copy(quiet = true)
+        ) { p -> app.push.chunk(p) }
+
+        table.add(
+            method(
+                "push.status",
+                Scope.BOOT_PUSH,
+                "How many bytes of an upload the app has, for resuming.",
+                false,
+                str("id", "The upload id from push.begin.", required = true),
+            )
+        ) { p -> app.push.status(p) }
+
+        table.add(
+            method(
+                "push.commit",
+                Scope.BOOT_PUSH,
+                "Closes the upload and asks the app to verify and keep it.",
+                true,
+                str("id", "The upload id from push.begin.", required = true),
+            )
+        ) { p -> app.push.commit(p) }
+
+        table.add(
+            method(
+                "push.abort",
+                Scope.BOOT_PUSH,
+                "Deletes a partial upload.",
+                true,
+                str("id", "The upload id from push.begin.", required = true),
+            )
+        ) { p -> app.push.abort(p) }
+
+        table.add(
+            method(
                 "journal.head",
                 Scope.READ,
                 "The journal's newest seq. Keep it: a later read of that seq shows whether the " +
