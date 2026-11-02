@@ -55,6 +55,10 @@ if [[ -n ${KOI_RELEASE_TAG:-} ]]; then
 	[[ $(git -C "$repo" rev-parse "refs/tags/$KOI_RELEASE_TAG^{commit}") == $(git -C "$repo" rev-parse HEAD) ]] ||
 		{ echo "HEAD is not the commit of $KOI_RELEASE_TAG" >&2; exit 1; }
 	export KOI_VERSION_NAME=${KOI_RELEASE_TAG#v}
+	# devd trusts the key that signs the public dev app and devd. Its public
+	# digest is committed, so anyone rebuilding a release gets the same pin.
+	KOI_CERT_SHA256=$(tr -d '[:space:]' < "$repo/dev/signing/release-dev-cert.sha256")
+	export KOI_CERT_SHA256
 fi
 echo "versionCode $KOI_VERSION_CODE, versionName $KOI_VERSION_NAME" >&2
 
