@@ -1,0 +1,7 @@
+# Reproducibility checks (release.yml, scripts/verify-reproducible.sh).
+# apksigcopier compares a signed APK with an unsigned rebuild by copying the
+# signature over. Install with: pip install --require-hashes -r <this file>
+apksigcopier==1.1.1 \
+    --hash=sha256:0834bb7d6f3607bb0994cf8cd2e26b8f0c9d481e13b75872e0fa9cec052e519b
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360

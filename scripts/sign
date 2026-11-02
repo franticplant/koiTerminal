@@ -45,12 +45,17 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/koi-sign.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 cp "$apk" "$work/in.apk"
 
+# zipalign lays the APK out (16 KiB pages for native libraries) and apksigner
+# keeps that layout, adding only the signature. So a signed APK is exactly its
+# zipaligned input plus a signature, which is what apksigcopier checks in
+# release.yml and scripts/verify-reproducible.sh.
 sign() {
 	local in=$1 out=$2
 	zipalign -P 16 -f 4 "$in" "$out.aligned"
 	apksigner sign \
 		--ks "$KEYS" --ks-key-alias "$KOI_KEY_ALIAS" \
 		--ks-pass env:KOI_KEYSTORE_PASSWORD --key-pass env:KOI_KEY_PASSWORD \
+		--alignment-preserved \
 		--v1-signing-enabled false --v2-signing-enabled true \
 		--v3-signing-enabled true --v4-signing-enabled true \
 		--out "$out" "$out.aligned"
@@ -76,6 +81,7 @@ else
 			apksigner sign \
 				--ks /signing/koi.p12 --ks-key-alias "$KOI_KEY_ALIAS" \
 				--ks-pass env:KOI_KEYSTORE_PASSWORD --key-pass env:KOI_KEY_PASSWORD \
+				--alignment-preserved \
 				--v1-signing-enabled false --v2-signing-enabled true \
 				--v3-signing-enabled true --v4-signing-enabled true \
 				--out /work/signed.apk /work/signed.apk.aligned

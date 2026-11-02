@@ -60,6 +60,18 @@ RUN . /opt/toolchain/toolchain.lock \
  && /opt/toolchain/install-cargo-tools.sh /opt/toolchain/toolchain.lock /opt/cargo/bin
 ENV PATH=/opt/cargo/bin:${PATH}
 
+# apksigcopier, for scripts/verify-reproducible.sh: compares a published,
+# signed APK with an unsigned rebuild. Hash-checked from
+# requirements-verify.txt, the same file the release workflow installs.
+COPY requirements-verify.txt /opt/toolchain/
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/verify \
+ && /opt/verify/bin/pip install --no-cache-dir --require-hashes --only-binary :all: \
+      -r /opt/toolchain/requirements-verify.txt \
+ && ln -s /opt/verify/bin/apksigcopier /usr/local/bin/apksigcopier
+
 # At run time the registry lives in a cache volume, not in the image.
 ENV CARGO_HOME=/cache/cargo \
     CARGO_TARGET_DIR=/cache/target \
