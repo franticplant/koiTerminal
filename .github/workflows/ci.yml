@@ -112,6 +112,7 @@ jobs:
       - name: Sign
         env:
           KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_KEYSTORE_PASSWORD }}
+          KOI_KEY_PASSWORD: ${{ secrets.KOI_KEY_PASSWORD }}
           KOI_KEY_ALIAS: ${{ vars.KOI_KEY_ALIAS }}
           KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
         run: |

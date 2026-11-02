@@ -589,6 +589,31 @@ mod connection_tests {
     }
 
     #[test]
+    fn close_key_only_unblocks_that_listener() {
+        let a_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a_addr = a_listener.local_addr().unwrap();
+        let mut a_client = TcpStream::connect(a_addr).unwrap();
+        let (a_server, _) = a_listener.accept().unwrap();
+        let b_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let b_addr = b_listener.local_addr().unwrap();
+        let mut b_client = TcpStream::connect(b_addr).unwrap();
+        let (b_server, _) = b_listener.accept().unwrap();
+        a_client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        b_client.set_nonblocking(true).unwrap();
+        let set = Connections::new();
+        let stop = AtomicBool::new(false);
+        assert!(set.insert(1, a_server, a_addr.to_string(), &stop));
+        assert!(set.insert(2, b_server, b_addr.to_string(), &stop));
+        set.close_key(&a_addr.to_string());
+        let mut buf = [0u8; 1];
+        assert_eq!(a_client.read(&mut buf).unwrap_or(0), 0);
+        assert_eq!(
+            b_client.read(&mut buf).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn insert_refuses_a_stopped_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

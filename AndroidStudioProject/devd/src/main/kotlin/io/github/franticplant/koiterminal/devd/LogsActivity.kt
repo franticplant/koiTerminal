@@ -32,6 +32,8 @@ class LogsActivity : Activity() {
     private var kind = "log"
     private var level = "debug"
     private var paused = false
+    @Volatile private var appLogsText = ""
+    @Volatile private var appLogsBusy = false
 
     private val refresh =
         object : Runnable {
@@ -53,7 +55,7 @@ class LogsActivity : Activity() {
                 ArrayAdapter(
                     this@LogsActivity,
                     android.R.layout.simple_spinner_dropdown_item,
-                    listOf("log", "access", "all"),
+                    listOf("log", "access", "all", "app"),
                 )
             onItemSelectedListener =
                 object : android.widget.AdapterView.OnItemSelectedListener {
@@ -63,7 +65,7 @@ class LogsActivity : Activity() {
                         position: Int,
                         id: Long,
                     ) {
-                        kind = listOf("log", "access", "all")[position]
+                        kind = listOf("log", "access", "all", "app")[position]
                     }
 
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -166,8 +168,48 @@ class LogsActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun refreshAppLogs() {
+        if (appLogsBusy) return
+        appLogsBusy = true
+        Thread {
+                val text =
+                    try {
+                        app.hooks.get(5_000)
+                        val reply = app.hooks.call("app.logs", JSONObject().put("max", 500))
+                        val err = reply.optJSONObject("error")
+                        if (err != null) {
+                            "error: ${err.optString("code")} ${err.optString("message")}"
+                        } else {
+                            val entries = reply.optJSONObject("result")?.optJSONArray("entries")
+                            val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+                            buildString {
+                                for (i in 0 until (entries?.length() ?: 0)) {
+                                    val e = entries!!.getJSONObject(i)
+                                    append(
+                                        "${fmt.format(Date(e.optLong("unixMs")))} " +
+                                            "${e.optString("level")} ${e.optString("component")} " +
+                                            "${e.optString("message")}\n"
+                                    )
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        "error: ${e.message ?: e.javaClass.simpleName}"
+                    }
+                appLogsText = text
+                appLogsBusy = false
+                runOnUiThread { if (kind == "app" && !isFinishing && !isDestroyed) view.text = appLogsText }
+            }
+            .start()
+    }
+
     private fun render() {
         if (paused) return
+        if (kind == "app") {
+            view.text = appLogsText
+            refreshAppLogs()
+            return
+        }
         val entries =
             app.journal.tail(
                 500,

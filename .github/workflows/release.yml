@@ -12,6 +12,7 @@
 # Required repository secrets:
 #   KOI_KEYSTORE_BASE64       base64 of the release .p12/.jks
 #   KOI_KEYSTORE_PASSWORD     keystore password
+#   KOI_KEY_PASSWORD          key password (optional; defaults to the store password)
 # Optional repository variables:
 #   KOI_KEY_ALIAS             key alias (default: koi)
 #   KOI_CERT_SHA256           expected signing certificate SHA-256 (hex)
@@ -111,6 +112,7 @@ jobs:
       - name: Sign
         env:
           KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_KEYSTORE_PASSWORD }}
+          KOI_KEY_PASSWORD: ${{ secrets.KOI_KEY_PASSWORD }}
           KOI_KEY_ALIAS: ${{ vars.KOI_KEY_ALIAS }}
           KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
         run: |

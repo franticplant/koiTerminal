@@ -236,7 +236,7 @@ Please see [BUILD.md](BUILD.md).
 
 # Misc
 ### License
-All new files and files from upstream GrapheneOS: released under Apache 2.0. See [LICENSE](LICENSE). See upstream license [NOTICE](NOTICE).
+All new files and files from upstream GrapheneOS: released under Apache 2.0. See [LICENCE](LICENCE). See upstream license [NOTICE](NOTICE).
 
 Folders from Termux: released under the same license as `terminal-view` and `terminal-emulator` directories from Termux (Apache 2.0). See [their LICENCE.md](https://github.com/termux/termux-app/blob/master/LICENCE.md). These include:
 - Files under `android/TerminalApp/java/com/termux`

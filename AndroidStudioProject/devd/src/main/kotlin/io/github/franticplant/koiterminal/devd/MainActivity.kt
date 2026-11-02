@@ -47,6 +47,7 @@ class MainActivity : Activity() {
     @Volatile private var busy = false
     @Volatile private var lastControlResult: String? = null
     @Volatile private var recentInstalls: String = ""
+    @Volatile private var installsBusy = false
 
     private val refresh =
         object : Runnable {
@@ -59,6 +60,11 @@ class MainActivity : Activity() {
     private val installsRefresh =
         object : Runnable {
             override fun run() {
+                if (installsBusy) {
+                    handler.postDelayed(this, 5_000)
+                    return
+                }
+                installsBusy = true
                 Thread {
                         val text =
                             try {
@@ -75,6 +81,7 @@ class MainActivity : Activity() {
                                 "  status error: ${e.message ?: e.javaClass.simpleName}"
                             }
                         recentInstalls = text
+                        installsBusy = false
                         runOnUiThread { if (!isFinishing && !isDestroyed) render() }
                     }
                     .start()
@@ -182,6 +189,7 @@ class MainActivity : Activity() {
             buttonRow(
                 "Start app" to { callApp("app.info") },
                 "VM status" to { callApp("vm.status") },
+                "Settings" to { callApp("settings.get") },
                 "Refresh" to { callApp("app.info") },
             )
         )
@@ -429,6 +437,10 @@ class MainActivity : Activity() {
                             "vm.reset" -> result?.optString("name") ?: "ok"
                             "app.restart" ->
                                 "pid ${result?.optInt("oldPid")} -> ${result?.optInt("newPid")}"
+                            "settings.get" ->
+                                "${result?.optInt("memoryMiB")} MiB, " +
+                                    "${result?.optString("network")}, keep-awake " +
+                                    "${result?.optBoolean("keepAwake")}"
                             else -> "ok"
                         }
                     }
@@ -449,6 +461,8 @@ class MainActivity : Activity() {
                 packageManager.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
             } catch (e: PackageManager.NameNotFoundException) {
                 return "$pkg: not installed"
+            } catch (e: Exception) {
+                return "$pkg: unavailable (${e.message ?: e.javaClass.simpleName})"
             }
         val signer =
             info.signingInfo?.apkContentsSigners?.firstOrNull()?.let { Tls.sha256Hex(it.toByteArray()) }

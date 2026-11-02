@@ -381,6 +381,23 @@ fn doctor(ctx: &Ctx) -> Result<ExitCode, String> {
                         println!("     ^ state is error");
                     }
                 }
+                if method == "packages.list" {
+                    for p in v.as_array().into_iter().flatten() {
+                        if p["installed"].as_bool() == Some(true)
+                            && p["pinnedSigner"].as_bool() != Some(true)
+                        {
+                            failures += 1;
+                            println!(
+                                "     ^ {} is not signed by the pinned certificate",
+                                p["package"].as_str().unwrap_or("?")
+                            );
+                        }
+                    }
+                }
+                if method == "app.info" && v["devTools"].as_bool() != Some(true) {
+                    failures += 1;
+                    println!("     ^ app is not the dev flavor");
+                }
             }
             Err(e) => {
                 failures += 1;
@@ -520,6 +537,8 @@ fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
         }
         i += 1;
     }
+    let level_filter = extra.get("level").and_then(Value::as_str).map(str::to_string);
+    let grep_filter = extra.get("grep").and_then(Value::as_str).map(str::to_string);
     let mut c = ctx.connect()?;
     let mut after = 0u64;
     loop {
@@ -542,6 +561,28 @@ fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
             println!("[{} entries dropped by the journal]", r["dropped"]);
         }
         for e in r["entries"].as_array().into_iter().flatten() {
+            if source == "app" {
+                if let Some(level) = &level_filter {
+                    let order = ["debug", "info", "warn", "error"];
+                    let want = order.iter().position(|v| v == level).unwrap_or(0);
+                    let got =
+                        order.iter().position(|v| Some(*v) == e["level"].as_str()).unwrap_or(0);
+                    if got < want {
+                        continue;
+                    }
+                }
+                if let Some(grep) = &grep_filter {
+                    let hay = format!(
+                        "{} {} {}",
+                        e["component"].as_str().unwrap_or(""),
+                        e["message"].as_str().unwrap_or(""),
+                        e["level"].as_str().unwrap_or("")
+                    );
+                    if !hay.to_lowercase().contains(&grep.to_lowercase()) {
+                        continue;
+                    }
+                }
+            }
             println!(
                 "{} {:<5} {:<10} {}",
                 fmt_time_ms(e["unixMs"].as_u64().unwrap_or(0)),
