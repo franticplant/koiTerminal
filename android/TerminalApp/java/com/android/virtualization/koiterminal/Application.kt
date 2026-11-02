@@ -22,7 +22,7 @@ import android.content.Context
 import com.android.virtualization.koiterminal.new2.core.Installer
 import com.android.virtualization.koiterminal.new2.core.VmController
 
-public class Application : AndroidApplication() {
+public open class Application : AndroidApplication() {
     override fun onCreate() {
         super.onCreate()
         if (LauncherActivity.terminalNewuiJetpack(this)) {

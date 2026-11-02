@@ -23,6 +23,11 @@ import org.json.JSONObject
 class DevHooksService : Service() {
     private val methods by lazy { AppMethods(application as Application) }
 
+    override fun onCreate() {
+        super.onCreate()
+        VmDiag.start()
+    }
+
     override fun onBind(intent: Intent?): IBinder =
         object : IDevHooks.Stub() {
             override fun catalog(): String {

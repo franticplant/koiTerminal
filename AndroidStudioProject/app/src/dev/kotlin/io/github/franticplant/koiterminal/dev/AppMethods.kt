@@ -92,19 +92,34 @@ class AppMethods(private val app: Application) {
             method(
                 "metrics.sample",
                 Scope.READ,
-                "This process as a metrics sample (pid, CPU, RSS/PSS, threads, fds) and the app " +
-                    "UID's traffic counters, in devd's sample shape.",
+                "This process as a metrics sample (pid, CPU, RSS/PSS, threads, fds), the VM and " +
+                    "image state, and the app UID's traffic counters, in devd's sample shape.",
             )
         ) {
             JSONObject()
                 .put("processes", JSONArray().put(ProcSelf.sample("koi-app")))
                 .put("sessions", JSONArray())
+                .put("vm", VmDiag.vmJson())
+                .put("install", VmDiag.installJson())
                 .put(
                     "uidTraffic",
                     JSONObject()
                         .put("rxBytes", TrafficStats.getUidRxBytes(Process.myUid()))
                         .put("txBytes", TrafficStats.getUidTxBytes(Process.myUid()))
                 )
+        }
+
+        table.add(
+            method(
+                "vm.logs",
+                Scope.READ,
+                "Recent koiTerminal VM and image state transitions observed in-process, not logcat.",
+                false,
+                long("after", "Entries with seq greater than this (default 0).", min = 0),
+                int("max", "At most this many (default 200).", min = 1, max = 500),
+            )
+        ) { p ->
+            VmDiag.read(p.longOr("after", 0), p.intOr("max", 200))
         }
 
         table.add(

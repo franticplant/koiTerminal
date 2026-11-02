@@ -26,11 +26,14 @@
         android:name=".DevdApp"
         android:allowBackup="false"
         android:fullBackupContent="false"
-        android:label="koi devd"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"
+            android:process=":ui"
             android:exported="true"
             android:launchMode="singleTop">
             <intent-filter>
@@ -39,12 +42,9 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".LogsActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".MetricsActivity"
+        <!-- The screen (:ui process) reaches the service through this; not exported. -->
+        <service
+            android:name=".UiService"
             android:exported="false" />
 
         <service

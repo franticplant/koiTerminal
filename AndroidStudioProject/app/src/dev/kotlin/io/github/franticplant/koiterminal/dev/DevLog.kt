@@ -11,6 +11,7 @@ import org.json.JSONObject
 object DevLog {
     private const val MAX = 512
     private val entries = ArrayDeque<JSONObject>()
+    private var generation = java.util.UUID.randomUUID().toString()
     private var seq = 0L
 
     @Synchronized
@@ -27,6 +28,14 @@ object DevLog {
         while (entries.size > MAX) entries.removeFirst()
     }
 
+    /** Simulates the app process being replaced, for host tests. */
+    @Synchronized
+    internal fun resetForTest() {
+        entries.clear()
+        seq = 0
+        generation = java.util.UUID.randomUUID().toString()
+    }
+
     /** Entries with seq > [after], oldest first, at most [max]. */
     @Synchronized
     fun read(after: Long, max: Int): JSONObject {
@@ -39,6 +48,9 @@ object DevLog {
             out.put(e)
             next = s
         }
-        return JSONObject().put("nextSeq", next).put("entries", out)
+        return JSONObject()
+            .put("generation", generation)
+            .put("nextSeq", next)
+            .put("entries", out)
     }
 }

@@ -174,6 +174,8 @@ class Metrics(private val app: DevdApp) {
                 .put("unixMs", now)
                 .put("koiConnected", koi != null)
                 .put("engineBackend", koi?.optString("engineBackend") ?: JSONObject.NULL)
+                .put("vm", koi?.optJSONObject("vm") ?: JSONObject.NULL)
+                .put("install", koi?.optJSONObject("install") ?: JSONObject.NULL)
                 .put("processes", processes)
                 .put("sessions", sessions)
         _version.value = now

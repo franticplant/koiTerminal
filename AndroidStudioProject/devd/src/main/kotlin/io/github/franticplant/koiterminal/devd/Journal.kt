@@ -115,6 +115,19 @@ class Journal(
         return JSONArray(picked)
     }
 
+    /**
+     * The newest [max] entries plus the sequence to continue from, read as one atomic snapshot so
+     * an entry appended between a separate tail and head call cannot be skipped.
+     */
+    @Synchronized
+    fun tailPage(max: Int, filter: (JSONObject) -> Boolean = { true }): JSONObject {
+        val entries = tail(max, filter)
+        val next =
+            if (entries.length() == 0) lastSeq
+            else entries.getJSONObject(entries.length() - 1).getLong("seq")
+        return JSONObject().put("entries", entries).put("nextSeq", next)
+    }
+
     /** Walks the whole chain. Reports the first break, if any. */
     @Synchronized
     fun verify(): JSONObject {

@@ -104,6 +104,12 @@ for apk in "$@"; do
 		else
 			bad "embedded updater pin ${embedded:-missing}, expected $pinned"
 		fi
+		notices=$(unzip -p "$apk" assets/third_party_notices.txt 2> /dev/null || true)
+		if [[ $notices == *"JAVA AND KOTLIN LIBRARIES"* && $notices == *"RUST CRATES"* ]]; then
+			ok "third-party notices are packaged"
+		else
+			bad "assets/third_party_notices.txt is missing or incomplete"
+		fi
 		continue
 	fi
 

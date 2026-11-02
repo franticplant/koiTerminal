@@ -44,6 +44,17 @@ class JournalTest {
     }
 
     @Test
+    fun tailPageReturnsTheCursorForTheNewestEntry() {
+        val journal = Journal(tempDir())
+        repeat(5) { journal.append(entry("m$it")) }
+        val page = journal.tailPage(2)
+        val entries = page.getJSONArray("entries")
+        assertEquals(2, entries.length())
+        assertEquals("m3", entries.getJSONObject(0).getString("message"))
+        assertEquals(5L, page.getLong("nextSeq"))
+    }
+
+    @Test
     fun detectsTampering() {
         val dir = tempDir()
         val journal = Journal(dir)

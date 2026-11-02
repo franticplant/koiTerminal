@@ -136,9 +136,18 @@ all presets. Logs and metrics have their own screens.
   `ports.list`) rather than SSH sessions.
 - devd's default port is **7391** (Veil uses 7390), so both can run on one
   phone during the transition.
-- The phone UI runs in devd's main process instead of a separate `:ui`
-  process. The service/UI split in Veil keeps the listener's memory apart from
-  the screen; koiTerminal can adopt it if the UI grows.
+- The phone UI follows Veil's split: the Compose screen runs in a separate
+  `:ui` process, the listener and its data live in the main process, and
+  `UiService` (AIDL, same-UID only) carries state and actions between them.
 - Metrics currently sample devd and the koiTerminal app. Veil also samples its
   engine, VM host and per-session connections; those have no koi equivalent
   yet.
+
+## Attribution
+
+The phone UI is a port of [Veil Terminal](https://github.com/franticplant/veil-terminal)'s
+devd screen (Compose layout, `LogViewer`, `MetricsView`, `RemoteDevd`,
+`UiService` and the `:ui` process split). Veil Terminal is also by the koiTerminal
+author and is Apache-2.0; the koi version keeps the same structure and adapts the
+names, package checks and API calls. The protocol, server and updater remain
+koiTerminal's own.

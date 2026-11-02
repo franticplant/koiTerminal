@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shared koiTerminal mark: a flowing koi carrying a shell prompt. -->
+    <path
+        android:pathData="M40,54 C43,45 47,41 51,39 Q51,32 63,31 L62,37 C72,36 82,43 84,52 C87,64 75,75 63,74 C53,74 48,65 40,61 C34,63 30,69 24,71 Q28,60 33,55 Q27,50 24,38 C32,41 35,48 40,54 Z"
+        android:fillColor="#FFF3DC" />
+    <path
+        android:pathData="M40,54 C35,48 32,41 24,38 Q27,50 33,55 Q28,60 24,71 C30,69 34,63 40,61 Q45,59 47,54 Z M51,39 Q51,32 63,31 L62,37 Q56,37 51,39 Z"
+        android:fillColor="#F47B45" />
+    <path
+        android:pathData="M43,48 C49,39 56,37 62,37 C65,44 56,48 51,54 C47,59 51,67 57,72 C49,69 47,64 40,61 Q47,55 43,48 Z"
+        android:fillColor="#F47B45" />
+    <!-- Bold, filled geometry stays legible at launcher size; no font glyphs. -->
+    <path
+        android:pathData="M55,46 L65,54 L55,62 L52,58 L58,54 L52,50 Z M66,60 H77 V64 H66 Z M78,47 A2,2 0,1 1,74,47 A2,2 0,1 1,78,47 Z"
+        android:fillColor="#101E2B" />
+</vector>
