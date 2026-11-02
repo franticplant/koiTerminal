@@ -56,7 +56,9 @@ runs:
         sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
         (yes | "$sdkmanager" --licenses > /dev/null) || true
         "$sdkmanager" --install "${pkgs[@]}" > /dev/null
+        # Both names: the runner image sets ANDROID_NDK_ROOT to its own NDK.
         echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK" >> "$GITHUB_ENV"
         echo "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS" >> "$GITHUB_PATH"
 
     - name: Cache Rust toolchain and cargo tools
@@ -111,7 +113,12 @@ runs:
     - name: Use the host toolchain
       shell: bash
       run: |
+        # Every cargo call uses the pinned toolchain, not the runner's default
+        # stable: only AndroidStudioProject/rust has a rust-toolchain.toml, and
+        # devd-native and koi-ctl live outside it.
+        . build/toolchain.lock
         {
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
           echo "KOI_HOST_TOOLCHAIN=1"
           echo "KOI_CACHE_DIR=$RUNNER_TEMP/koi-cache"
           echo "CARGO_TARGET_DIR=$HOME/.cache/koi-target"
