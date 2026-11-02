@@ -8,6 +8,9 @@ updates:
       - "/.github/actions/setup-build"
     schedule:
       interval: "weekly"
+    # Let a new release age a week before proposing it.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ".github:"
     groups:
@@ -18,6 +21,9 @@ updates:
     directory: "/AndroidStudioProject"
     schedule:
       interval: "weekly"
+    # Let a new release age a week before proposing it.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "android:"
     open-pull-requests-limit: 10
@@ -31,6 +37,9 @@ updates:
     directory: "/dev/ctl"
     schedule:
       interval: "weekly"
+    # Let a new release age a week before proposing it.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ctl:"
     groups:
@@ -41,6 +50,9 @@ updates:
     directory: "/AndroidStudioProject/devd-native"
     schedule:
       interval: "weekly"
+    # Let a new release age a week before proposing it.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "devd:"
     groups:

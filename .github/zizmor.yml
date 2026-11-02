@@ -1,0 +1,12 @@
+# zizmor configuration (workflow linter, run in ci.yml).
+rules:
+  # The setup action writes only fixed tool paths and pinned versions to
+  # GITHUB_ENV/GITHUB_PATH. No workflow that uses it runs on
+  # pull_request_target or another trigger that carries untrusted input.
+  github-env:
+    ignore:
+      - action.yml
+  # Prefers a newer "$/..." spelling for local actions; "./..." is the form
+  # the runners have always supported, so keep it until that one is proven.
+  self-repository:
+    disable: true

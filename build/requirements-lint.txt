@@ -1,0 +1,4 @@
+# Workflow linter for CI (.github/workflows/ci.yml). Installed with
+# pip --require-hashes, so a changed upload on PyPI fails the install.
+zizmor==1.31.1 \
+    --hash=sha256:58e878eb2dbd2c6183c105e1ac28c14f7dd1eca44a783f1fe2a69647d012c410
