@@ -1,6 +1,7 @@
 package io.github.franticplant.koiterminal.devd
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import androidx.test.core.app.ApplicationProvider
 import io.github.franticplant.koiterminal.dev.api.ApiException
@@ -16,6 +17,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+// Uploads are not exercised here; they go through the app-owned fd path.
+private abstract class FakeHooks : IDevHooks.Stub() {
+    override fun openUpload(uploadId: String): ParcelFileDescriptor? = null
+}
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class HooksTest {
@@ -27,7 +33,7 @@ class HooksTest {
         )
 
     private fun fake(catalog: String = "[]", result: String = """{"result":{"ok":true}}""") =
-        object : IDevHooks.Stub() {
+        object : FakeHooks() {
             override fun catalog(): String = catalog
 
             override fun call(method: String, paramsJson: String): String = result
@@ -48,7 +54,7 @@ class HooksTest {
     @Test
     fun deadBinderBecomesUnavailable() {
         hooks.attachForTest(
-            object : IDevHooks.Stub() {
+            object : FakeHooks() {
                 override fun catalog(): String = "[]"
 
                 override fun call(method: String, paramsJson: String): String =
