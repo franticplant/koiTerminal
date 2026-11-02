@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Builds unsigned koiTerminal APKs in the build container.
+#
+#   scripts/build [dev|prod|devd|all] [-- extra gradle args]
+#
+# Output:
+#   AndroidStudioProject/app/build/outputs/apk/dev/release/app-dev-release-unsigned.apk
+#   AndroidStudioProject/app/build/outputs/apk/prod/release/app-prod-release-unsigned.apk
+#   AndroidStudioProject/devd/build/outputs/apk/release/devd-release-unsigned.apk
+# "all" builds the app (dev and prod) and devd.
+# Then: scripts/sign dev (signs into dist/).
+#
+# The version comes from git, here on the host: versionCode grows from the
+# 2026091900 base with commit time, so it never goes backwards and a dev and a
+# prod build of one commit share it; versionName is <base>-g<sha>, plus
+# "-dirty" when the tree has uncommitted changes.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+flavor=${1:-dev}
+shift || true
+[[ ${1:-} == -- ]] && shift
+
+case $flavor in
+dev) tasks=(:app:assembleDevRelease) ;;
+prod) tasks=(:app:assembleProdRelease) ;;
+devd) tasks=(:devd:assembleRelease) ;;
+all) tasks=(:app:assembleDevRelease :app:assembleProdRelease :devd:assembleRelease) ;;
+*) echo "usage: $0 [dev|prod|devd|all] [-- gradle args]" >&2; exit 2 ;;
+esac
+
+# Local dev signing. CI sets the same names from the release environment.
+if [[ -f "$repo/dev/keystore.env" ]]; then
+	set -a
+	. "$repo/dev/keystore.env"
+	set +a
+fi
+
+base=2026091900
+base_time=1789776000 # 2026-09-19T00:00:00Z, the release the fork is based on
+commit_time=$(git -C "$repo" log -1 --format=%ct)
+sha=$(git -C "$repo" rev-parse --short=7 HEAD)
+# Untracked files count: a build tagged "clean" must not contain an untracked
+# source file. Generated outputs are ignored, so they do not trip this.
+status=$(git -C "$repo" status --porcelain --untracked-files=normal)
+dirty=$([[ -z $status ]] && echo || echo -dirty)
+export KOI_VERSION_CODE=$((base + (commit_time - base_time) / 60))
+export KOI_VERSION_NAME=$base-g$sha$dirty
+# A release (KOI_RELEASE_TAG=v1.2.3, set by release.yml) is named after its
+# tag, and only builds from a clean tree at exactly that tag's commit.
+if [[ -n ${KOI_RELEASE_TAG:-} ]]; then
+	[[ $KOI_RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] ||
+		{ echo "release tag $KOI_RELEASE_TAG is not vMAJOR.MINOR.PATCH[-suffix]" >&2; exit 1; }
+	[[ -z $dirty ]] || { echo "refusing a release build from a dirty tree" >&2; exit 1; }
+	[[ $(git -C "$repo" rev-parse "refs/tags/$KOI_RELEASE_TAG^{commit}") == $(git -C "$repo" rev-parse HEAD) ]] ||
+		{ echo "HEAD is not the commit of $KOI_RELEASE_TAG" >&2; exit 1; }
+	export KOI_VERSION_NAME=${KOI_RELEASE_TAG#v}
+fi
+echo "versionCode $KOI_VERSION_CODE, versionName $KOI_VERSION_NAME" >&2
+
+# The Android Studio project needs the modified SDK and the app's Rust JNI
+# libraries. Do both inside the build container so a clean checkout works.
+if [[ ${KOI_SKIP_PREPARE:-} != 1 ]]; then
+	"$repo/scripts/run" bash -c 'cd AndroidStudioProject && ./tools/setup.sh && ./tools/build_rust.sh'
+fi
+
+exec "$repo/scripts/run" ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain "${tasks[@]}" "$@"

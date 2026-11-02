@@ -1,4 +1,24 @@
 # How to build koiTerminal
+
+## Fast path (this repository)
+
+The standalone Android Studio project builds in the pinned Podman container;
+the same tool list runs in CI. See [`docs/devd.md`](docs/devd.md) for the
+development control plane.
+
+```sh
+scripts/build all        # app dev + prod + devd, unsigned
+scripts/sign dev         # dist/koi-<version>-dev.apk
+scripts/sign prod        # dist/koi-<version>.apk
+scripts/sign devd        # dist/koi-devd-<version>.apk
+scripts/ctl --install    # dist/koi-ctl and ~/.local/bin/koi-ctl
+```
+
+The local dev key is `AndroidStudioProject/keystore.jks`; it and
+`dev/keystore.env` are gitignored. The committed pin in
+`dev/signing/koi-dev-cert.sha256` is the public digest. A release build must
+use the key from the `release` environment (or set `KOI_CERT_SHA256`).
+
 Thanks to [@zhuowei](https://github.com/zhuowei), koiTerminal can now be built with Android Studio for quicker development.
 
 The manual releases will still be built with the OS so that koiTerminal remains a soft fork of the upstream Linux Terminal app.

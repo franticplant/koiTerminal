@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Signs a built koiTerminal APK with the koi key.
+#
+#   scripts/sign dev|prod|devd
+#
+# Signs AndroidStudioProject/app/build/outputs/apk/<flavor>/release/*.apk
+# (devd: AndroidStudioProject/devd/build/outputs/apk/release/*.apk) and writes
+# dist/koi-<version>.apk (devd: dist/koi-devd-<version>.apk), plus .idsig and
+# .certs. Verifies the signer against dev/signing/koi-dev-cert.sha256 and runs
+# the release check.
+#
+# Needs KOI_KEYSTORE (default: AndroidStudioProject/keystore.jks),
+# KOI_KEYSTORE_PASSWORD and KOI_KEY_ALIAS (default: koi). Local defaults come
+# from dev/keystore.env when present. CI sets them from the release environment.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+if [[ -f "$repo/dev/keystore.env" ]]; then
+	set -a
+	. "$repo/dev/keystore.env"
+	set +a
+fi
+
+flavor=${1:-}
+case $flavor in
+dev) default_apk=$(echo "$repo"/AndroidStudioProject/app/build/outputs/apk/dev/release/*.apk) ;;
+prod) default_apk=$(echo "$repo"/AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk) ;;
+devd) default_apk=$(echo "$repo"/AndroidStudioProject/devd/build/outputs/apk/release/*.apk) ;;
+*) echo "usage: $0 dev|prod|devd [APK]" >&2; exit 2 ;;
+esac
+apk=${2:-$default_apk}
+[[ -f $apk ]] || { echo "no APK at $apk; run scripts/build first" >&2; exit 1; }
+
+: "${KOI_KEYSTORE:=$repo/AndroidStudioProject/keystore.jks}"
+: "${KOI_KEY_ALIAS:=koi}"
+: "${KOI_KEYSTORE_PASSWORD:=${KEYSTORE_PASSWORD:-}}"
+: "${KOI_KEYSTORE_PASSWORD:?set KOI_KEYSTORE_PASSWORD (source dev/keystore.env)}"
+: "${KOI_KEY_PASSWORD:=$KOI_KEYSTORE_PASSWORD}"
+[[ -f $KOI_KEYSTORE ]] || { echo "keystore not found: $KOI_KEYSTORE" >&2; exit 1; }
+export KOI_KEYSTORE_PASSWORD KOI_KEY_ALIAS KOI_KEY_PASSWORD
+
+pinned=${KOI_CERT_SHA256:-$(tr -d '[:space:]' < "$repo/dev/signing/koi-dev-cert.sha256")}
+pinned=$(printf '%s' "$pinned" | tr 'A-F' 'a-f')
+work=$(mktemp -d "${TMPDIR:-/tmp}/koi-sign.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+cp "$apk" "$work/in.apk"
+
+sign() {
+	local in=$1 out=$2
+	zipalign -P 16 -f 4 "$in" "$out.aligned"
+	apksigner sign \
+		--ks "$KEYS" --ks-key-alias "$KOI_KEY_ALIAS" \
+		--ks-pass env:KOI_KEYSTORE_PASSWORD --key-pass env:KOI_KEY_PASSWORD \
+		--v1-signing-enabled false --v2-signing-enabled true \
+		--v3-signing-enabled true --v4-signing-enabled true \
+		--out "$out" "$out.aligned"
+	rm -f "$out.aligned"
+	apksigner verify --print-certs "$out" > "$out.certs"
+	aapt2 dump badging "$out" | head -1 > "$out.badging"
+}
+
+if [[ ${KOI_HOST_TOOLCHAIN:-} == 1 ]]; then
+	KEYS=$KOI_KEYSTORE sign "$work/in.apk" "$work/signed.apk"
+else
+	image=$("$repo/scripts/lib/image-tag.sh" "$repo")
+	podman image exists "$image" || { echo "build image $image missing; run scripts/build first" >&2; exit 1; }
+	# The keystore is bind-mounted read-only at a fixed path; no network.
+	podman run --rm --network=none --security-opt label=disable --userns=keep-id \
+		-v "$repo":/src:z \
+		-v "$work":/work:z \
+		-v "$KOI_KEYSTORE":/signing/koi.p12:ro \
+		-e KOI_KEYSTORE_PASSWORD -e KOI_KEY_ALIAS -e KOI_KEY_PASSWORD \
+		--entrypoint bash "$image" -c '
+			set -e
+			zipalign -P 16 -f 4 /work/in.apk /work/signed.apk.aligned
+			apksigner sign \
+				--ks /signing/koi.p12 --ks-key-alias "$KOI_KEY_ALIAS" \
+				--ks-pass env:KOI_KEYSTORE_PASSWORD --key-pass env:KOI_KEY_PASSWORD \
+				--v1-signing-enabled false --v2-signing-enabled true \
+				--v3-signing-enabled true --v4-signing-enabled true \
+				--out /work/signed.apk /work/signed.apk.aligned
+			rm -f /work/signed.apk.aligned
+			apksigner verify --print-certs /work/signed.apk > /work/signed.apk.certs
+			aapt2 dump badging /work/signed.apk | head -1 > /work/signed.apk.badging
+		'
+fi
+
+got=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$work/signed.apk.certs")
+if [[ $got != "$pinned" ]]; then
+	echo "signer digest $got does not match the pinned $pinned" >&2
+	exit 1
+fi
+version=$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" "$work/signed.apk.badging")
+mkdir -p "$repo/dist"
+if [[ $flavor == devd ]]; then
+	out=$repo/dist/koi-devd-$version.apk
+else
+	out=$repo/dist/koi-$version.apk
+fi
+mv "$work/signed.apk" "$out"
+mv "$work/signed.apk.idsig" "$out.idsig" 2>/dev/null || true
+cp "$work/signed.apk.certs" "$out.certs"
+echo "signed $out"
+
+check=()
+[[ $flavor == dev ]] && check=(--expect-dev)
+[[ $flavor == devd ]] && check=(--devd)
+rel=${out#"$repo"/}
+"$repo/scripts/run" --offline scripts/check-release-apk.sh "${check[@]}" "$rel"

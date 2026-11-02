@@ -303,11 +303,18 @@ internal data class ConfigJson(
         const val DEFAULT_BOOT_TIMEOUT_SECS: Int = 60
         const val DEFAULT_CONSOLE_INPUT_DEVICE: String = "hvc0"
 
-        /** Parses JSON file at jsonPath */
-        fun from(context: Context, jsonPath: Path): ConfigJson {
+        /** Parses JSON file at jsonPath. */
+        fun from(context: Context, jsonPath: Path): ConfigJson = from(context, jsonPath, emptyMap())
+
+        /** Parses JSON file at jsonPath, with extra keywords such as `$PROFILE_DIR`. */
+        fun from(
+            context: Context,
+            jsonPath: Path,
+            extraKeywords: Map<String, String>,
+        ): ConfigJson {
             try {
                 FileReader(jsonPath.toFile()).use { fileReader ->
-                    val content = replaceKeywords(fileReader, context)
+                    val content = replaceKeywords(fileReader, context, extraKeywords)
                     return Gson().fromJson(content, ConfigJson::class.java)
                 }
             } catch (e: Exception) {
@@ -315,24 +322,48 @@ internal data class ConfigJson(
             }
         }
 
-        @Throws(IOException::class)
-        private fun replaceKeywords(r: Reader, context: Context): String {
+        /** Parses JSON text with the normal keywords plus [extraKeywords]. */
+        fun fromJson(
+            context: Context,
+            json: String,
+            extraKeywords: Map<String, String> = emptyMap(),
+        ): ConfigJson =
+            try {
+                Gson().fromJson(substitute(context, json, extraKeywords), ConfigJson::class.java)
+            } catch (e: Exception) {
+                throw RuntimeException("Failed to parse VM config", e)
+            }
+
+        /** Substitutes the keywords used by vm_config.json and boot profiles. */
+        fun substitute(
+            context: Context,
+            text: String,
+            extraKeywords: Map<String, String> = emptyMap(),
+        ): String {
             val rules: Map<String, String> =
                 mapOf(
                     "\\\$PAYLOAD_DIR" to InstalledImage.getDefault(context).installDir.toString(),
                     "\\\$PACKAGE_NAME" to context.getPackageName(),
                     "\\\$APP_DATA_DIR" to context.getDataDir().toString(),
-                )
-
-            return BufferedReader(r).useLines { lines ->
-                lines
-                    .map { line ->
-                        rules.entries.fold(line) { acc, rule ->
-                            acc.replace(rule.key.toRegex(), rule.value)
-                        }
+                ) + extraKeywords
+            return text
+                .lineSequence()
+                .map { line ->
+                    rules.entries.fold(line) { acc, rule ->
+                        acc.replace(rule.key.toRegex(), rule.value)
                     }
-                    .joinToString("\n")
-            }
+                }
+                .joinToString("\n")
         }
+
+        @Throws(IOException::class)
+        private fun replaceKeywords(
+            r: Reader,
+            context: Context,
+            extraKeywords: Map<String, String>,
+        ): String =
+            BufferedReader(r).use { it.readText() }.let {
+                substitute(context, it, extraKeywords)
+            }
     }
 }

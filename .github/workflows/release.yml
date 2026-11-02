@@ -1,0 +1,204 @@
+# Builds the koiTerminal release APK and devd from a v* tag, signs them,
+# attests them (SLSA build provenance and an SPDX SBOM, via Sigstore) and
+# publishes a GitHub release. Anyone can check a download with:
+#   gh attestation verify <file> -R franticplant/koiTerminal
+#   sha256sum -c SHA256SUMS
+#
+# Triggered by pushing a tag like v0.1.0, or manually for an existing tag.
+# Tags with a suffix (v0.1.0-rc1) are pre-releases. The signing secrets live in
+# the "release" environment, which should only admit the integration branch and
+# v* tags. Release notes come from docs/release-notes/<tag>.md at the tag.
+#
+# Required repository secrets:
+#   KOI_KEYSTORE_BASE64       base64 of the release .p12/.jks
+#   KOI_KEYSTORE_PASSWORD     keystore password
+#   KOI_KEY_PASSWORD          key password (optional; defaults to the store password)
+# Optional repository variables:
+#   KOI_KEY_ALIAS             key alias (default: koi)
+#   KOI_CERT_SHA256           expected signing certificate SHA-256 (hex)
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign and attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # Sigstore signing certificate for attestations
+      attestations: write
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-build
+
+      - name: Rust tests and lints
+        run: |
+          scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
+          scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
+          scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Build unsigned APKs
+        env:
+          KOI_RELEASE_TAG: ${{ env.TAG }}
+        run: scripts/build all
+
+      - name: JVM tests and lint
+        run: |
+          scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
+            :devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
+            lintDevRelease lintProdRelease :devd:lintRelease
+
+      - name: Release check (prod has no dev pieces)
+        run: scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
+      - name: Release check (devd)
+        run: scripts/run scripts/check-release-apk.sh --unsigned --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+
+      - name: Build koi-ctl
+        run: scripts/ctl
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KOI_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "::error::KOI_KEYSTORE_BASE64 is not set; see the header of this workflow."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/koi.p12"
+          echo "KOI_KEYSTORE=$RUNNER_TEMP/koi.p12" >> "$GITHUB_ENV"
+
+      - name: Sign
+        env:
+          KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_KEYSTORE_PASSWORD }}
+          KOI_KEY_PASSWORD: ${{ secrets.KOI_KEY_PASSWORD }}
+          KOI_KEY_ALIAS: ${{ vars.KOI_KEY_ALIAS }}
+          KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
+        run: |
+          scripts/sign prod
+          scripts/sign devd
+          rm -f "$RUNNER_TEMP/koi.p12"
+
+      - name: Checksums and SBOM
+        run: |
+          cp "$RUNNER_TEMP/sbom.spdx.json" "dist/koi-$TAG.spdx.json"
+          (cd dist && sha256sum koi-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          sbom-path: dist/koi-${{ env.TAG }}.spdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ env.TAG }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: docs/release-notes
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ env.TAG }}
+          path: dist
+
+      - name: Verify checksums
+        run: (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          prerelease=""
+          if [[ "$TAG" == *-* || "$TAG" == v0.* ]]; then prerelease="--prerelease"; fi
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ $draft != true ]]; then
+              echo "::error::$TAG is already published; releases are immutable. Cut a new tag."
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" --jq .body > generated.md
+          if [[ -f "docs/release-notes/$TAG.md" ]]; then
+            { cat "docs/release-notes/$TAG.md"; echo; grep -m1 'Full Changelog' generated.md || true; } > notes.md
+          else
+            echo "::warning::docs/release-notes/$TAG.md not found; using GitHub's generated notes."
+            mv generated.md notes.md
+          fi
+          {
+            echo
+            echo "---"
+            echo "Built by GitHub Actions from \`$BUILD_SHA\`."
+            echo
+            echo "Every file has a signed build-provenance and SBOM attestation. To verify:"
+            echo
+            echo "    gh attestation verify <file> -R $GH_REPO"
+            echo
+            echo "or compare against \`SHA256SUMS\`."
+          } >> notes.md
+          gh release create "$TAG" dist/* $prerelease --verify-tag --title "$TAG" --notes-file notes.md

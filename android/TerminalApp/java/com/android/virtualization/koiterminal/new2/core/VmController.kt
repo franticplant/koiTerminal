@@ -47,9 +47,13 @@ import com.android.virtualization.koiterminal.new2.ui.main.NetworkConnection
 import com.android.virtualization.koiterminal.new2.util.LoggingMutableStateFlow
 import java.io.IOException
 import java.util.concurrent.Executors
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -64,6 +68,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.android.virtualization.koiterminal.SerialConsole
 import com.android.virtualization.koiterminal.SerialIOManager
 
 object VmController {
@@ -72,6 +77,8 @@ object VmController {
     private lateinit var context: Context
     private var serialIO: SerialIOManager? = null
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var startJob: Job? = null
+    @Volatile private var shuttingDown = false
     private val _vmState = LoggingMutableStateFlow<VmState>(MutableStateFlow(VmState.Ready), TAG)
     val vmState: StateFlow<VmState> = _vmState.asStateFlow()
 
@@ -89,7 +96,9 @@ object VmController {
             }
             .stateIn(
                 scope = repositoryScope,
-                started = SharingStarted.WhileSubscribed(5000),
+                // The dev API reads .value without subscribing; keep the
+                // controller's port snapshot current for headless callers too.
+                started = SharingStarted.Eagerly,
                 initialValue = emptyList(),
             )
 
@@ -101,6 +110,51 @@ object VmController {
 
     private var vmConfigJson: ConfigJson? = null
         private set
+
+    /**
+     * A one-shot boot recipe from the dev flavour. Production never passes one: the normal path
+     * stays `InstalledImage.getDefault()` + its `vm_config.json`.
+     */
+    internal data class BootOverride(
+        val source: String,
+        val profile: String?,
+        val config: ConfigJson,
+        val agentInstalled: Boolean,
+        val useInstalledDisks: Boolean,
+        val memoryMib: Int?,
+    )
+
+    private val _bootReport = MutableStateFlow<JSONObject?>(null)
+
+    /** The last start's boot source and which steps were applied or skipped. */
+    val bootReport: JSONObject?
+        get() = _bootReport.value
+
+    @Volatile private var runningProfileValue: String? = null
+
+    /** The profile the current VM was started from, or null for the installed image. */
+    val runningProfile: String?
+        get() = runningProfileValue
+
+    @Volatile private var lastProfileValue: String? = null
+
+    /** The profile the last start used, even after it stopped, or null for the installed image. */
+    val lastProfile: String?
+        get() = lastProfileValue
+
+    private val _lastExit = MutableStateFlow<JSONObject?>(null)
+
+    /** The last stop or error, with its reason, uptime and console tail. */
+    val lastExit: JSONObject?
+        get() = _lastExit.value
+
+    private val exits = ArrayDeque<JSONObject>()
+    @Volatile private var startedMs = 0L
+
+    /** The last [max] stops/errors, oldest first. */
+    fun exitHistory(max: Int): JSONArray = synchronized(exits) {
+        JSONArray().apply { exits.takeLast(max.coerceAtLeast(1)).forEach { put(it) } }
+    }
 
     fun initialize(context: Context) {
         this.context = context.applicationContext
@@ -118,9 +172,19 @@ object VmController {
         }
     }
 
-    fun enablePortForwarding(port: Int, enable: Boolean) {
-        _guestAgentController.value?.enablePortForwarding(port, enable)
+    fun enablePortForwarding(port: Int, enable: Boolean): Boolean {
+        val controller = _guestAgentController.value ?: return false
+        controller.enablePortForwarding(port, enable)
+        return true
     }
+
+    /** Whether the guest agent is up and can take shutdown/port calls. */
+    val guestAgentReady: Boolean
+        get() = _guestAgentController.value?.ready == true
+
+    /** Whether the koi guest service is up for tty resize calls. */
+    val koiServiceReady: Boolean
+        get() = _guestAgentController.value?.koiReady == true
 
     val graphicsAccelerationType: GraphicsManager.AccelerationType
         get() = GraphicsManager.getInstance(context).accelerationType
@@ -132,9 +196,7 @@ object VmController {
         GraphicsManager.getInstance(context).accelerationType = type
     }
 
-    fun shutdownVm() {
-        _guestAgentController.value?.shutdownVm()
-    }
+    fun shutdownVm(): Boolean = _guestAgentController.value?.shutdownVm() ?: false
 
     fun pullClipboardFromGuest() {
         _guestAgentController.value?.pullClipboardFromGuest()
@@ -148,14 +210,15 @@ object VmController {
         repositoryScope.launch { _sessionDiscarded.emit(sessionId) }
     }
 
-    fun resizeTtyWindow(columns: Int, rows: Int) {
+    fun resizeTtyWindow(columns: Int, rows: Int): Boolean {
+        val controller = _guestAgentController.value ?: return false
         val target = vmConfigJson?.getConsoleInputDevice() ?: ConfigJson.DEFAULT_CONSOLE_INPUT_DEVICE
         val targetEnum = when (target) {
             "hvc0" -> IkoiService.TTY_HVC0
             "ttyS0" -> IkoiService.TTY_TTYS0
             else -> IkoiService.TTY_HVC0
         }
-        _guestAgentController.value?.resizeTtyWindow(targetEnum, columns, rows)
+        return controller.resizeTtyWindow(targetEnum, columns, rows)
     }
 
     // It should add and then remove a display to reflect the change.
@@ -189,30 +252,60 @@ object VmController {
         }
     }
 
-    fun start() {
-        if (_vmState.value is VmState.Running || _vmState.value is VmState.Starting) return
+    @Synchronized
+    internal fun start(boot: BootOverride? = null) {
+        // Stopping and Rebooting are alive too: a start during shutdown would
+        // race the stop that is cancelling/joining the previous startup. The
+        // separate flag covers the window before the state becomes Stopping.
+        if (shuttingDown || _vmState.value.isAlive) return
 
-        val intent = Intent(context, VmService::class.java)
-        context.startForegroundService(intent)
-        repositoryScope.launch {
-            _vmState.value = VmState.Starting
+        val steps =
+            BootPlan.steps(
+                fromProfile = boot != null,
+                agentInstalled = boot?.agentInstalled ?: true,
+                useInstalledDisks = boot?.useInstalledDisks ?: true,
+                profileMemory = boot?.memoryMib != null,
+            )
+        _bootReport.value =
+            JSONObject()
+                .put("source", boot?.source ?: "installed")
+                .put("applied", JSONArray(steps.first))
+                .put("skipped", JSONArray(steps.second))
+        runningProfileValue = boot?.profile
+        lastProfileValue = boot?.profile
+        startedMs = System.currentTimeMillis()
+
+        // Publish the transition before any asynchronous work, so a second
+        // caller cannot pass the state check while this one is starting.
+        _vmState.value = VmState.Starting
+        try {
+            context.startForegroundService(Intent(context, VmService::class.java))
+        } catch (e: RuntimeException) {
+            _vmState.value = VmState.Error(e)
+            return
+        }
+        startJob = repositoryScope.launch {
             try {
                 val image = InstalledImage.getDefault(context)
-                val json = ConfigJson.from(context, image.configPath)
+                val json = boot?.config ?: ConfigJson.from(context, image.configPath)
                 vmConfigJson = json
                 val configBuilder = json.toConfigBuilder(context)
+                val useAgent = boot?.agentInstalled ?: true
                 Log.d(TAG, "image.isAidlGuestAgent=${image.isAidlGuestAgent()}")
                 _guestAgentController.value =
-                    GuestAgentController(context, image.isAidlGuestAgent(), repositoryScope)
+                    if (useAgent) GuestAgentController(context, image.isAidlGuestAgent(), repositoryScope)
+                    else null
 
                 val sharedPref =
                     context.getSharedPreferences(SettingsViewModel.PREFS_NAME, Context.MODE_PRIVATE)
-                val memoryMib =
-                    sharedPref.getInt(
-                        SettingsViewModel.KEY_MEMORY_MIB,
-                        SettingsViewModel.DEFAULT_MEMORY_MIB,
-                    )
-                configBuilder.setMemoryBytes(memoryMib.toLong() * 1024 * 1024)
+                if (boot?.memoryMib == null) {
+                    val memoryMib =
+                        sharedPref.getInt(
+                            SettingsViewModel.KEY_MEMORY_MIB,
+                            SettingsViewModel.DEFAULT_MEMORY_MIB,
+                        )
+                    configBuilder.setMemoryBytes(memoryMib.toLong() * 1024 * 1024)
+                }
 
                 val customImageConfigBuilder = json.toCustomImageConfigBuilder(context)
 
@@ -225,35 +318,40 @@ object VmController {
                 }
 
                 // Convert rootfs disk into a sparse file for storage ballooning.
-                truncateDiskIfNecessary(image)
-
-                if (image.hasBackup()) {
-                    customImageConfigBuilder.addDisk(
-                        VirtualMachineCustomImageConfig.Disk.RWDisk(image.backupFile.toString())
-                    )
+                if (boot == null || boot.useInstalledDisks) {
+                    truncateDiskIfNecessary(image)
+                    if (image.hasBackup()) {
+                        customImageConfigBuilder.addDisk(
+                            VirtualMachineCustomImageConfig.Disk.RWDisk(image.backupFile.toString())
+                        )
+                    }
                 }
 
-                try {
-                    val port = _guestAgentController.value!!.startServer()
-                    Log.d(TAG, "gRPC startServer() returns port=$port")
-                    customImageConfigBuilder.addParam("debian_server_port=$port")
-                } catch (e: RuntimeException) {
-                    // Ignore if failed due to revoked NETWORK permission on GrapheneOS
-                    Log.d(TAG, "Guest control server cannot be started: ${e.message}, ${e.cause}")
-                    if (e.message?.contains(Regex("""grpc server""")) == false) {
-                        throw e
+                if (useAgent) {
+                    try {
+                        val port = _guestAgentController.value!!.startServer()
+                        Log.d(TAG, "gRPC startServer() returns port=$port")
+                        customImageConfigBuilder.addParam("debian_server_port=$port")
+                    } catch (e: RuntimeException) {
+                        // Ignore if failed due to revoked NETWORK permission on GrapheneOS
+                        Log.d(TAG, "Guest control server cannot be started: ${e.message}, ${e.cause}")
+                        if (e.message?.contains(Regex("""grpc server""")) == false) {
+                            throw e
+                        }
                     }
                 }
 
                 // Override config for Display
                 setDisplayConfig(customImageConfigBuilder)
                 setGpuConfig(context, customImageConfigBuilder)
-                customImageConfigBuilder.setAudioConfig(
-                    VirtualMachineCustomImageConfig.AudioConfig.Builder()
-                        .setUseSpeaker(true)
-                        .setUseMicrophone(true)
-                        .build()
-                )
+                if (boot == null) {
+                    customImageConfigBuilder.setAudioConfig(
+                        VirtualMachineCustomImageConfig.AudioConfig.Builder()
+                            .setUseSpeaker(true)
+                            .setUseMicrophone(true)
+                            .build()
+                    )
+                }
                 configBuilder.setCustomImageConfig(customImageConfigBuilder.build())
 
                 val config = configBuilder.build()
@@ -287,17 +385,30 @@ object VmController {
 
                         override fun onError(vm: VirtualMachine, errorCode: Int, message: String) {
                             Log.e(TAG, "VM error: $message ($errorCode)")
+                            recordExit("error", errorCode, "ERROR", message)
                             _vmState.value = VmState.Error(RuntimeException("VM error: $message"))
+                            runningProfileValue = null
+                            serialIO?.flagForShutdown()
                             _guestAgentController.value?.stop()
                         }
 
                         override fun onStopped(vm: VirtualMachine, reason: Int) {
                             Log.i("VmController", "VM stopped. reason: $reason")
+                            val name =
+                                when (reason) {
+                                    VirtualMachineCallback.STOP_REASON_SHUTDOWN -> "SHUTDOWN"
+                                    VirtualMachineCallback.STOP_REASON_KILLED -> "KILLED"
+                                    VirtualMachineCallback.STOP_REASON_REBOOT -> "REBOOT"
+                                    else -> "UNKNOWN($reason)"
+                                }
+                            recordExit("stop", reason, name, null)
+                            serialIO?.flagForShutdown()
                             if (
                                 reason == VirtualMachineCallback.STOP_REASON_SHUTDOWN ||
                                     reason == VirtualMachineCallback.STOP_REASON_KILLED
                             ) {
                                 _vmState.value = VmState.Stopped
+                                runningProfileValue = null
                             } else if (reason == VirtualMachineCallback.STOP_REASON_REBOOT) {
                                 _vmState.value = VmState.Rebooting
                             } else {
@@ -386,7 +497,7 @@ object VmController {
                 val inWritingPfd = serialIO?.getSerialInPfd()
                 Log.i("VmController", "inWritingPfd=${inWritingPfd?.getFd()} outReadingPfd=${outReadingPfd?.getFd()}")
 
-                if (canUseTtydOverVsock()) {
+                if (useAgent && canUseTtydOverVsock()) {
                     Log.i(TAG, "Connect to ttyd using vsock")
                     val bridge = AndroidToVmBridge(virtualMachine!!)
                     val port = bridge.start()
@@ -407,7 +518,7 @@ object VmController {
                 val timeout = json.getBootTimeoutSecs() ?: 60
                 val effectiveTimeout = if (IS_EMULATOR) (timeout * 10) else timeout
 
-                if (image.isAidlGuestAgent()) {
+                if (useAgent && image.isAidlGuestAgent()) {
                     repositoryScope.launch {
                         delay(TimeUnit.SECONDS.toMillis(effectiveTimeout.toLong()))
                         if (_vmState.value == VmState.Starting) {
@@ -417,12 +528,15 @@ object VmController {
                                 )
                         }
                     }
-                } else if (!canUseTtydOverVsock()) {
+                } else if (useAgent && !canUseTtydOverVsock()) {
                     startTtydDiscovery(effectiveTimeout.toLong())
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start VM", e)
+                recordExit("error", -1, "START_FAILED", e.message)
                 _vmState.value = VmState.Error(e)
+                runningProfileValue = null
+                serialIO?.flagForShutdown()
                 _guestAgentController.value?.stop()
             }
         }
@@ -543,19 +657,37 @@ object VmController {
         return buildId >= FIRST_VERSION_SUPPORTS_TTYD_VSOCK
     }
 
+    @Synchronized
     fun stop() {
-        if (_vmState.value == VmState.Stopped || _vmState.value == VmState.Stopping) return
+        if (shuttingDown || _vmState.value == VmState.Stopped || _vmState.value == VmState.Stopping)
+            return
 
+        // Publish the transition synchronously; the stop itself is asynchronous.
+        shuttingDown = true
+        _vmState.value = VmState.Stopping
+        val startup = startJob
+        startJob = null
         repositoryScope.launch {
-            _vmState.value = VmState.Stopping
             try {
-                virtualMachine?.stop()
-            } catch (e: VirtualMachineException) {
-                Log.w("VmController", "Failed to stop VM", e)
+                // A start that is still booting must finish cancelling before we
+                // stop and publish Stopped, or it can resume and replace the state.
+                startup?.cancelAndJoin()
+                try {
+                    virtualMachine?.stop()
+                } catch (e: VirtualMachineException) {
+                    Log.w("VmController", "Failed to stop VM", e)
+                }
+                vmConfig = null
+                vmConfigJson = null
+            } finally {
+                // Publish Stopped before reopening admission, as one critical
+                // section shared with start/stop.
+                synchronized(this@VmController) {
+                    _vmState.value = VmState.Stopped
+                    runningProfileValue = null
+                    shuttingDown = false
+                }
             }
-            vmConfig = null
-            vmConfigJson = null
-            _vmState.value = VmState.Stopped
         }
     }
 
@@ -582,6 +714,24 @@ object VmController {
             } catch (e: IOException) {
                 throw RuntimeException("Failed to truncate a disk", e)
             }
+        }
+    }
+
+    private fun recordExit(kind: String, reason: Int, name: String, message: String?) {
+        val e =
+            JSONObject()
+                .put("kind", kind)
+                .put("reason", reason)
+                .put("name", name)
+                .put("unixMs", System.currentTimeMillis())
+                .put("bootSource", bootReport?.optString("source") ?: "unknown")
+                .put("uptimeMs", if (startedMs > 0) System.currentTimeMillis() - startedMs else 0)
+                .put("consoleTail", String(SerialConsole.tail(4096), Charsets.UTF_8))
+        if (message != null) e.put("message", message)
+        _lastExit.value = e
+        synchronized(exits) {
+            exits.addLast(e)
+            while (exits.size > 20) exits.removeFirst()
         }
     }
 

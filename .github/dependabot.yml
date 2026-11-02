@@ -1,0 +1,48 @@
+# Keeps the pinned action SHAs and the dependency graphs moving. The Rust
+# crates are grouped so a bump lands as one reviewable PR per graph.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/setup-build"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: ".github:"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "gradle"
+    directory: "/AndroidStudioProject"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "android:"
+    open-pull-requests-limit: 10
+    groups:
+      androidx:
+        patterns: ["androidx.*"]
+      kotlin:
+        patterns: ["org.jetbrains.kotlin*", "org.jetbrains.kotlinx*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/dev/ctl"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ctl:"
+    groups:
+      ctl:
+        patterns: ["*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/AndroidStudioProject/devd-native"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "devd:"
+    groups:
+      devd-native:
+        patterns: ["*"]

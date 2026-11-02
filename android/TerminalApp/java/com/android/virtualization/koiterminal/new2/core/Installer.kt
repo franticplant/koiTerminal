@@ -106,9 +106,12 @@ object Installer {
     private var networkMonitor: NetworkMonitor? = null
     private var installJob: Job? = null
 
+    /** True between a start request and the job becoming active. */
+    @Volatile private var starting = false
+
     /** Whether an installation or upgrade process is currently active. */
     val isInstalling: Boolean
-        get() = installJob?.isActive == true
+        get() = starting || installJob?.isActive == true
 
     fun initialize(context: Context) {
         this.context = context.applicationContext
@@ -119,21 +122,59 @@ object Installer {
         repositoryScope.launch { checkInstallStatus() }
     }
 
+    @Synchronized
     fun install() {
         if (installState.value.isStarted() || installState.value is InstallState.Installed) {
             return
         }
-        val intent = Intent(context, VmService::class.java)
-        context.startForegroundService(intent)
-        installJob = repositoryScope.launch { installInternal() }
+        // Reserve the transition before starting the asynchronous work, so two
+        // callers cannot both pass the state check.
+        starting = true
+        _installState.value =
+            InstallState.Installing(
+                0,
+                MutableStateFlow(0L).asStateFlow(),
+                networkMonitor?.isWifiConnected?.value ?: false,
+            )
+        try {
+            context.startForegroundService(Intent(context, VmService::class.java))
+        } catch (e: RuntimeException) {
+            starting = false
+            _installState.value = InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
+            return
+        }
+        installJob =
+            repositoryScope.launch {
+                try {
+                    installInternal()
+                } catch (e: RuntimeException) {
+                    _installState.value =
+                        InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
+                } finally {
+                    starting = false
+                }
+            }
     }
 
+    @Synchronized
     fun upgrade() {
         if (installState.value.isStarted()) {
             return
         }
-        val intent = Intent(context, VmService::class.java)
-        context.startForegroundService(intent)
+        starting = true
+        _installState.value =
+            InstallState.Installing(
+                0,
+                MutableStateFlow(0L).asStateFlow(),
+                networkMonitor?.isWifiConnected?.value ?: false,
+            )
+        try {
+            context.startForegroundService(Intent(context, VmService::class.java))
+        } catch (e: RuntimeException) {
+            starting = false
+            _installState.value = InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
+            return
+        }
         installJob =
             repositoryScope.launch {
                 try {
@@ -149,6 +190,11 @@ object Installer {
                 } catch (e: IOException) {
                     _installState.value =
                         InstallState.Error(e, InstallState.ErrorCause.UninstallFailed)
+                } catch (e: RuntimeException) {
+                    _installState.value =
+                        InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
+                } finally {
+                    starting = false
                 }
             }
     }
