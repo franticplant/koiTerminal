@@ -45,9 +45,10 @@ scripts/ctl --install      # dist/koi-ctl and ~/.local/bin/koi-ctl
 
 The local dev key is `AndroidStudioProject/keystore.jks`; its public digest is
 `dev/signing/koi-dev-cert.sha256`. The private key and `dev/keystore.env` are
-gitignored. Releases use the key from the `release` environment and must match
-`KOI_CERT_SHA256` (or the committed pin, if it was updated to the release
-certificate).
+gitignored. Releases are signed only in CI: the dev app and devd with the dev
+release key, whose digest is `dev/signing/release-dev-cert.sha256`, and a
+release devd pins that certificate. A local build and a release build therefore
+cannot update each other; uninstall one to install the other.
 
 First install, once per phone:
 

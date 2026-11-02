@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Builds one commit twice from clean clones, in different directories and with
+# separate, empty caches, and checks that every output is byte-identical.
+#
+#   scripts/check-repeatable [COMMIT] [WORKDIR]
+#
+# COMMIT defaults to HEAD; WORKDIR to a new temporary directory. Takes as long
+# as two cold builds. Outputs compared: the unsigned dev, prod and devd APKs,
+# and koi-ctl.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+rev=$(git -C "$repo" rev-parse "${1:-HEAD}^{commit}")
+work=${2:-$(mktemp -d "${TMPDIR:-/tmp}/koi-repeat.XXXXXX")}
+mkdir -p "$work"
+echo "commit $rev, work in $work"
+
+outputs=(
+	AndroidStudioProject/app/build/outputs/apk/dev/release/app-dev-release-unsigned.apk
+	AndroidStudioProject/app/build/outputs/apk/prod/release/app-prod-release-unsigned.apk
+	AndroidStudioProject/devd/build/outputs/apk/release/devd-release-unsigned.apk
+	dist/koi-ctl
+)
+
+for n in a b; do
+	src=$work/build-$n/koiTerminal
+	rm -rf "$work/build-$n" "$work/cache-$n"
+	mkdir -p "$work/build-$n"
+	git clone -q --no-hardlinks "$repo" "$src"
+	git -C "$src" checkout -q "$rev"
+	echo "== build $n (log: $work/build-$n.log)"
+	(
+		cd "$src"
+		export KOI_CACHE_DIR=$work/cache-$n
+		scripts/build all
+		scripts/ctl
+	) > "$work/build-$n.log" 2>&1 || { echo "build $n failed; see $work/build-$n.log" >&2; exit 1; }
+done
+
+fail=0
+for f in "${outputs[@]}"; do
+	a=$work/build-a/koiTerminal/$f
+	b=$work/build-b/koiTerminal/$f
+	if cmp -s "$a" "$b"; then
+		echo "  same  $(sha256sum < "$a" | cut -c1-16)  $f"
+	else
+		echo "  DIFF  $f"
+		fail=1
+	fi
+done
+[[ $fail == 0 ]] && echo "repeatable: both builds are identical"
+exit $fail

@@ -1,21 +1,36 @@
-# Builds the koiTerminal release APK and devd from a v* tag, signs them,
-# attests them (SLSA build provenance and an SPDX SBOM, via Sigstore) and
-# publishes a GitHub release. Anyone can check a download with:
+# Releases from a v* tag. Four jobs:
+#
+#   build      builds everything unsigned in the pinned build container
+#              (build/Containerfile), runs the tests and release checks, and
+#              makes the SBOM. No secrets.
+#   reproduce  builds the same tag again, the same way, on a separate runner.
+#              No secrets.
+#   sign       (release environment: v* tags only, owner approval) checks that
+#              both builds are byte-identical, signs the prod app with the prod
+#              key and the dev app and devd with the dev key, checks every
+#              signer against its committed certificate, checks that signing
+#              changed nothing but the signature, and attests the files (SLSA
+#              build provenance and an SPDX SBOM, via Sigstore).
+#   publish    creates the GitHub release.
+#
+# Anyone can check a download:
 #   gh attestation verify <file> -R franticplant/koiTerminal
 #   sha256sum -c SHA256SUMS
+#   scripts/verify-reproducible.sh <tag>      (rebuilds and compares)
 #
-# Triggered by pushing a tag like v0.1.0, or manually for an existing tag.
-# Tags with a suffix (v0.1.0-rc1) are pre-releases. The signing secrets live in
-# the "release" environment, which should only admit the integration branch and
-# v* tags. Release notes come from docs/release-notes/<tag>.md at the tag.
+# Releases are built in the same container scripts/verify-reproducible.sh
+# uses, so anyone with podman rebuilds them the same way: same compilers, same
+# paths. (CI's everyday builds use the faster host toolchain instead.)
 #
-# Required repository secrets:
-#   KOI_KEYSTORE_BASE64       base64 of the release .p12/.jks
-#   KOI_KEYSTORE_PASSWORD     keystore password
-#   KOI_KEY_PASSWORD          key password (optional; defaults to the store password)
-# Optional repository variables:
-#   KOI_KEY_ALIAS             key alias (default: koi)
-#   KOI_CERT_SHA256           expected signing certificate SHA-256 (hex)
+# Tags with a suffix (v0.1.0-rc.1), and every v0.* tag, are pre-releases.
+# Release notes come from docs/release-notes/<tag>.md at the tag.
+#
+# The "release" environment holds, per key (PROD and DEV):
+#   secrets    KOI_<KEY>_KEYSTORE_BASE64, KOI_<KEY>_KEYSTORE_PASSWORD,
+#              KOI_<KEY>_KEY_PASSWORD
+#   variables  KOI_<KEY>_KEY_ALIAS, KOI_<KEY>_CERT_SHA256
+# The certificate digests are also committed in dev/signing/release-*.sha256;
+# the sign job refuses to run if the two disagree.
 name: Release
 
 on:
@@ -32,7 +47,6 @@ permissions:
   contents: read
 
 env:
-  KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
   TAG: ${{ inputs.tag || github.ref_name }}
 
 concurrency:
@@ -41,24 +55,57 @@ concurrency:
 
 jobs:
   build:
-    name: Build, sign and attest
+    name: Build ${{ matrix.run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    environment: release
-    permissions:
-      contents: read
-      id-token: write # Sigstore signing certificate for attestations
-      attestations: write
-    outputs:
-      sha: ${{ steps.head.outputs.sha }}
+    strategy:
+      fail-fast: true
+      matrix:
+        # "reproduce" is an independent rebuild on its own runner.
+        run: [primary, reproduce]
     steps:
+      # Full history so scripts/build can check that HEAD is the tag's commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
           persist-credentials: false
 
+      # The container brings its own SDK, NDK and toolchains; the runner's are
+      # not used, and removing them leaves room for the container's.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Build unsigned APKs
+        env:
+          KOI_RELEASE_TAG: ${{ env.TAG }}
+        run: scripts/build all
+      - name: Build koi-ctl
+        run: scripts/ctl
+
+      - name: Tests and lints
+        if: matrix.run == 'primary'
+        run: |
+          scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
+          scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
+          scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+          scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
+            :devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
+            lintDevRelease lintProdRelease :devd:lintRelease
+
+      - name: Release checks
+        if: matrix.run == 'primary'
+        run: |
+          KOI_CERT_SHA256=$(tr -d '[:space:]' < dev/signing/release-dev-cert.sha256)
+          export KOI_CERT_SHA256
+          scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
+          scripts/run scripts/check-release-apk.sh --unsigned --expect-dev AndroidStudioProject/app/build/outputs/apk/dev/release/*.apk
+          scripts/run scripts/check-release-apk.sh --unsigned --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+
       - name: Generate SBOM
+        if: matrix.run == 'primary'
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: .
@@ -67,64 +114,135 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
-      - id: head
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Collect
+        env:
+          RUN: ${{ matrix.run }}
+        run: |
+          mkdir -p out
+          cp AndroidStudioProject/app/build/outputs/apk/prod/release/app-prod-release-unsigned.apk out/
+          cp AndroidStudioProject/app/build/outputs/apk/dev/release/app-dev-release-unsigned.apk out/
+          cp AndroidStudioProject/devd/build/outputs/apk/release/devd-release-unsigned.apk out/
+          cp dist/koi-ctl out/
+          git rev-parse HEAD > out/commit
+          if [[ $RUN == primary ]]; then cp "$RUNNER_TEMP/sbom.spdx.json" out/; fi
+          (cd out && sha256sum -- *)
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-${{ matrix.run }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    name: Sign and attest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # Sigstore signing certificate for attestations
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-build
+        with:
+          signing-only: "true"
 
-      - name: Rust tests and lints
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-primary
+          path: unsigned
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-reproduce
+          path: reproduce
+
+      - name: Both builds are identical
         run: |
-          scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
-          scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
-          scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+          for f in app-prod-release-unsigned.apk app-dev-release-unsigned.apk devd-release-unsigned.apk koi-ctl commit; do
+            if cmp -s "unsigned/$f" "reproduce/$f"; then
+              echo "identical  $f"
+            else
+              echo "::error::$f differs between the two builds; refusing to sign"
+              exit 1
+            fi
+          done
+          [[ $(cat unsigned/commit) == $(git rev-parse HEAD) ]] || { echo "::error::built commit is not the tag's"; exit 1; }
 
-      - name: Build unsigned APKs
+      - name: Environment matches the committed certificates
         env:
-          KOI_RELEASE_TAG: ${{ env.TAG }}
-        run: scripts/build all
-
-      - name: JVM tests and lint
+          PROD_VAR: ${{ vars.KOI_PROD_CERT_SHA256 }}
+          DEV_VAR: ${{ vars.KOI_DEV_CERT_SHA256 }}
         run: |
-          scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
-            :devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
-            lintDevRelease lintProdRelease :devd:lintRelease
+          prod=$(tr -d '[:space:]' < dev/signing/release-prod-cert.sha256)
+          dev=$(tr -d '[:space:]' < dev/signing/release-dev-cert.sha256)
+          [[ ${PROD_VAR,,} == "$prod" ]] || { echo "::error::KOI_PROD_CERT_SHA256 does not match dev/signing/release-prod-cert.sha256"; exit 1; }
+          [[ ${DEV_VAR,,} == "$dev" ]] || { echo "::error::KOI_DEV_CERT_SHA256 does not match dev/signing/release-dev-cert.sha256"; exit 1; }
+          [[ $prod != "$dev" ]] || { echo "::error::prod and dev must use different keys"; exit 1; }
 
-      - name: Release check (prod has no dev pieces)
-        run: scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
-      - name: Release check (devd)
-        run: scripts/run scripts/check-release-apk.sh --unsigned --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+      - name: Install apksigcopier (pinned, hash-checked)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/verify"
+          "$RUNNER_TEMP/verify/bin/pip" install --quiet --require-hashes --only-binary :all: -r build/requirements-verify.txt
+          echo "$RUNNER_TEMP/verify/bin" >> "$GITHUB_PATH"
 
-      - name: Build koi-ctl
-        run: scripts/ctl
-
-      - name: Decode keystore
+      - name: Sign prod (prod key)
         env:
-          KEYSTORE_BASE64: ${{ secrets.KOI_KEYSTORE_BASE64 }}
+          KEYSTORE_BASE64: ${{ secrets.KOI_PROD_KEYSTORE_BASE64 }}
+          KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_PROD_KEYSTORE_PASSWORD }}
+          KOI_KEY_PASSWORD: ${{ secrets.KOI_PROD_KEY_PASSWORD }}
+          KOI_KEY_ALIAS: ${{ vars.KOI_PROD_KEY_ALIAS }}
         run: |
-          if [[ -z "$KEYSTORE_BASE64" ]]; then
-            echo "::error::KOI_KEYSTORE_BASE64 is not set; see the header of this workflow."
-            exit 1
-          fi
+          [[ -n $KEYSTORE_BASE64 ]] || { echo "::error::KOI_PROD_KEYSTORE_BASE64 is not set"; exit 1; }
           umask 077
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/koi.p12"
-          echo "KOI_KEYSTORE=$RUNNER_TEMP/koi.p12" >> "$GITHUB_ENV"
+          export KOI_KEYSTORE=$RUNNER_TEMP/prod.p12
+          trap 'rm -f "$KOI_KEYSTORE"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KOI_KEYSTORE"
+          KOI_CERT_SHA256=$(tr -d '[:space:]' < dev/signing/release-prod-cert.sha256)
+          export KOI_CERT_SHA256
+          scripts/sign prod unsigned/app-prod-release-unsigned.apk
 
-      - name: Sign
+      - name: Sign the dev app and devd (dev key)
         env:
-          KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_KEYSTORE_PASSWORD }}
-          KOI_KEY_PASSWORD: ${{ secrets.KOI_KEY_PASSWORD }}
-          KOI_KEY_ALIAS: ${{ vars.KOI_KEY_ALIAS }}
-          KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
+          KEYSTORE_BASE64: ${{ secrets.KOI_DEV_KEYSTORE_BASE64 }}
+          KOI_KEYSTORE_PASSWORD: ${{ secrets.KOI_DEV_KEYSTORE_PASSWORD }}
+          KOI_KEY_PASSWORD: ${{ secrets.KOI_DEV_KEY_PASSWORD }}
+          KOI_KEY_ALIAS: ${{ vars.KOI_DEV_KEY_ALIAS }}
         run: |
-          scripts/sign prod
-          scripts/sign devd
-          rm -f "$RUNNER_TEMP/koi.p12"
+          [[ -n $KEYSTORE_BASE64 ]] || { echo "::error::KOI_DEV_KEYSTORE_BASE64 is not set"; exit 1; }
+          umask 077
+          export KOI_KEYSTORE=$RUNNER_TEMP/dev.p12
+          trap 'rm -f "$KOI_KEYSTORE"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KOI_KEYSTORE"
+          KOI_CERT_SHA256=$(tr -d '[:space:]' < dev/signing/release-dev-cert.sha256)
+          export KOI_CERT_SHA256
+          scripts/sign dev unsigned/app-dev-release-unsigned.apk
+          scripts/sign devd unsigned/devd-release-unsigned.apk
+
+      # scripts/sign zipaligns, then signs without moving anything; align the
+      # unsigned builds the same way and the only difference left must be the
+      # signature.
+      - name: Signing changed nothing but the signature
+        run: |
+          v=${TAG#v}
+          mkdir -p aligned
+          for p in "app-prod-release-unsigned:koi-$v" "app-dev-release-unsigned:koi-$v-dev" "devd-release-unsigned:koi-devd-$v"; do
+            u=${p%%:*} s=${p#*:}
+            zipalign -P 16 -f 4 "unsigned/$u.apk" "aligned/$u.apk"
+            apksigcopier compare --unsigned "dist/$s.apk" "aligned/$u.apk"
+            echo "only the signature differs: $s.apk"
+          done
 
       - name: Checksums and SBOM
         run: |
-          cp "$RUNNER_TEMP/sbom.spdx.json" "dist/koi-$TAG.spdx.json"
-          (cd dist && sha256sum koi-* > SHA256SUMS)
-          cat dist/SHA256SUMS
+          cp unsigned/koi-ctl dist/koi-ctl
+          cp unsigned/sbom.spdx.json "dist/koi-$TAG.spdx.json"
+          (cd dist && sha256sum -- koi-* > SHA256SUMS && cat SHA256SUMS)
 
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -146,17 +264,18 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
-      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
-          sparse-checkout: docs/release-notes
+          sparse-checkout: |
+            docs/release-notes
+            dev/signing
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -171,8 +290,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          BUILD_SHA: ${{ needs.build.outputs.sha }}
         run: |
+          build_sha=$(git rev-parse HEAD)
           prerelease=""
           if [[ "$TAG" == *-* || "$TAG" == v0.* ]]; then prerelease="--prerelease"; fi
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
@@ -193,12 +312,17 @@ jobs:
           {
             echo
             echo "---"
-            echo "Built by GitHub Actions from \`$BUILD_SHA\`."
+            echo "Built by GitHub Actions from \`$build_sha\`, twice on separate runners, with identical results."
+            echo
+            echo "Signing certificates (SHA-256):"
+            echo
+            echo "- prod app: \`$(tr -d '[:space:]' < dev/signing/release-prod-cert.sha256)\`"
+            echo "- dev app and devd: \`$(tr -d '[:space:]' < dev/signing/release-dev-cert.sha256)\`"
             echo
             echo "Every file has a signed build-provenance and SBOM attestation. To verify:"
             echo
             echo "    gh attestation verify <file> -R $GH_REPO"
             echo
-            echo "or compare against \`SHA256SUMS\`."
+            echo "or compare against \`SHA256SUMS\`, or rebuild with \`scripts/verify-reproducible.sh $TAG\`."
           } >> notes.md
           gh release create "$TAG" dist/* $prerelease --verify-tag --title "$TAG" --notes-file notes.md
