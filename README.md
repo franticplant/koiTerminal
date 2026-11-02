@@ -6,7 +6,7 @@
 
 **Status: alpha, developer preview.** Everything upstream does still works.
 The additions below are usable from the command line but still rough, and
-there are no releases of this fork yet.
+releases are pre-releases for now.
 
 ## Why
 
@@ -73,7 +73,10 @@ scripts/ctl --install    # build koi-ctl
 
 See [BUILD.md](BUILD.md). Releases are built only by CI from tags, and carry
 SBOM and build-provenance attestations
-(`gh attestation verify <file> -R franticplant/koiTerminal`).
+(`gh attestation verify <file> -R franticplant/koiTerminal`). Each release is
+built twice on separate runners and must come out identical before it is
+signed; `scripts/verify-reproducible.sh <tag>` rebuilds one and compares it
+with what was published.
 
 ## Credits and licence
 

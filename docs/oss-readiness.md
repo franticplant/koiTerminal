@@ -46,12 +46,12 @@ and where each item stands. It is engineering record-keeping, not legal advice.
 | Gate | State |
 |---|---|
 | Secret scan of every commit this fork adds | Done before the first push. No secrets, keystores or key files committed |
-| Releases only from CI, from protected `v*` tags, with the owner's approval on the `release` environment | Workflow in place. Repository rules to be configured |
+| Releases only from CI, from protected `v*` tags, with the owner's approval on the `release` environment | Done: tag and branch rulesets, and the `release` environment admits only `v*` tags with the owner as required reviewer |
 | SBOM and SLSA build provenance (Sigstore) | In the release workflow |
 | Release check: `prod` contains no dev pieces; devd checked separately | In CI and the release workflow |
-| Separate release keys: one for `prod`, one for `dev` and `devd` releases. Neither exists outside the `release` environment. Each artifact's signer checked against its expected certificate | To do |
-| `dev` flavour under its own application ID, so it installs beside `prod` | To do |
-| Repeatable builds: two clean builds compare byte for byte | Done on the build host (2026-11-02): the unsigned dev, prod and devd APKs and koi-ctl were identical across two clean builds with empty caches. Matching across different machines is the reproduce job's task |
-| Reproducible releases: a second CI runner rebuilds and compares against the signed release; a public verification script | To do |
-| Release notes that name their inputs (upstream base; U-Boot and kernel sources if shipped) | To do. The `v0.1.0` draft must be rewritten before tagging |
+| Separate release keys: one for `prod`, one for `dev` and `devd` releases. Neither exists outside the `release` environment. Each artifact's signer checked against its expected certificate | Done in the release workflow. Both certificates are committed in `dev/signing/release-*-cert.sha256` and must match the environment's copies |
+| `dev` flavour under its own application ID, so it installs beside `prod` | Not planned for now: a second ID would need its own one-time ADB permission grant. `dev` and `prod` share the ID; switching means uninstalling the other |
+| Repeatable builds: two clean builds compare byte for byte | Done on the build host (2026-11-02): the unsigned dev, prod and devd APKs and koi-ctl were identical across two clean builds with empty caches. `scripts/check-repeatable` repeats the check |
+| Reproducible releases: a second CI runner rebuilds and compares against the signed release; a public verification script | In the release workflow: a second runner rebuilds with no caches and signing stops unless both builds are identical; apksigcopier checks that signing changed only the signature. `scripts/verify-reproducible.sh <tag>` does the same against a published release. First exercised by `v0.0.1-rc.1` |
+| Release notes that name their inputs (upstream base; U-Boot and kernel sources if shipped) | Done for `v0.0.1`: the notes name the upstream base commit. No U-Boot or kernel is shipped yet |
 | devd's safe defaults documented (listener off until started, loopback only, auto-off, scoped and expiring pairings) | Done (`README.md`, `docs/devd.md`) |
