@@ -39,7 +39,7 @@ runs:
         java-version: ${{ steps.lock.outputs.jdk }}
 
     - name: Cache Android NDK
-      if: inputs.signing-only != 'true'
+      if: inputs['signing-only'] != 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: /usr/local/lib/android/sdk/ndk/${{ steps.lock.outputs.ndk }}
@@ -50,7 +50,7 @@ runs:
       run: |
         . build/toolchain.lock
         pkgs=("$ANDROID_PLATFORM" "build-tools;$ANDROID_BUILD_TOOLS")
-        if [[ "${{ inputs.signing-only }}" != true && ! -d "$ANDROID_HOME/ndk/$ANDROID_NDK" ]]; then
+        if [[ "${{ inputs['signing-only'] }}" != true && ! -d "$ANDROID_HOME/ndk/$ANDROID_NDK" ]]; then
           pkgs+=("ndk;$ANDROID_NDK")
         fi
         sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -60,7 +60,7 @@ runs:
         echo "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS" >> "$GITHUB_PATH"
 
     - name: Cache Rust toolchain and cargo tools
-      if: inputs.signing-only != 'true'
+      if: inputs['signing-only'] != 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
@@ -70,7 +70,7 @@ runs:
         key: rust-tools-${{ runner.os }}-${{ steps.lock.outputs.hash }}
 
     - name: Rust toolchain and cargo tools
-      if: inputs.signing-only != 'true'
+      if: inputs['signing-only'] != 'true'
       shell: bash
       run: |
         rustup toolchain install 1.99.1 --profile minimal \
@@ -83,7 +83,7 @@ runs:
         echo "$HOME/.koi-tools" >> "$GITHUB_PATH"
 
     - name: Cache cargo registry and target directory
-      if: inputs.cache == 'true' && inputs.signing-only != 'true'
+      if: inputs.cache == 'true' && inputs['signing-only'] != 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
@@ -95,7 +95,7 @@ runs:
         restore-keys: cargo-${{ runner.os }}-${{ steps.lock.outputs.hash }}-
 
     - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-      if: inputs.signing-only != 'true'
+      if: inputs['signing-only'] != 'true'
       with:
         cache-disabled: ${{ inputs.cache != 'true' }}
         cache-read-only: ${{ github.ref != 'refs/heads/koiterminal' }}

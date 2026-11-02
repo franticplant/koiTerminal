@@ -91,11 +91,19 @@ class Hooks(private val context: Context, private val log: DevdLog) {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (binder == null) {
                 val left = deadline - System.currentTimeMillis()
-                if (left <= 0)
+                if (left <= 0) {
+                    if (bound) {
+                        try {
+                            context.unbindService(connection)
+                        } catch (e: IllegalArgumentException) {}
+                        bound = false
+                    }
+                    catalog = null
                     throw ApiException(
                         ErrorCode.UNAVAILABLE,
                         "koiTerminal did not come up within $timeoutMs ms",
                     )
+                }
                 lock.wait(left)
             }
             return binder!!
@@ -118,6 +126,14 @@ class Hooks(private val context: Context, private val log: DevdLog) {
     val connected: Boolean
         get() = synchronized(lock) { binder != null }
 
+    /** Test seam: install a fake binder without a real Android service. */
+    internal fun attachForTest(fake: IDevHooks?) {
+        synchronized(lock) {
+            binder = fake
+            catalog = null
+        }
+    }
+
     fun call(method: String, params: JSONObject): JSONObject =
         JSONObject(remote { it.call(method, params.toString()) })
 
@@ -126,11 +142,12 @@ class Hooks(private val context: Context, private val log: DevdLog) {
         return try {
             block(b)
         } catch (e: DeadObjectException) {
-            synchronized(lock) { if (binder === b) binder = null }
+            unbind()
             throw ApiException(ErrorCode.UNAVAILABLE, "the koiTerminal process ended during the call")
         } catch (e: SecurityException) {
             throw ApiException(ErrorCode.UNAVAILABLE, "koiTerminal refused the call: ${e.message}")
         } catch (e: RemoteException) {
+            unbind()
             throw ApiException(ErrorCode.UNAVAILABLE, "Binder call failed: ${e.message}")
         }
     }

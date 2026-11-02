@@ -28,29 +28,15 @@ import org.json.JSONObject
 class AppMethods(private val app: Application) {
     val table = MethodTable()
 
-    private val lifecycle = Any()
-    @Volatile private var exiting = false
+    private val gate =
+        AppGate(
+            vmAlive = { VmController.vmState.value.isAlive },
+            installStarted = { Installer.installState.value.isStarted() },
+        )
 
-    /** Reject control work once an exit has been admitted; the process is going away. */
-    private fun checkRunning() {
-        synchronized(lifecycle) {
-            if (exiting)
-                throw ApiException(ErrorCode.UNAVAILABLE, "the app is exiting")
-        }
-    }
+    private fun checkRunning() = gate.checkRunning()
 
-    /** Admit an exit only when no VM or install is active, and close control work. */
-    private fun reserveExit() {
-        synchronized(lifecycle) {
-            if (exiting)
-                throw ApiException(ErrorCode.UNAVAILABLE, "the app is already exiting")
-            if (VmController.vmState.value.isAlive)
-                throw ApiException(ErrorCode.FAILED, "stop the VM before exiting")
-            if (Installer.installState.value.isStarted())
-                throw ApiException(ErrorCode.FAILED, "finish the install before exiting")
-            exiting = true
-        }
-    }
+    private fun reserveExit() = gate.reserveExit()
 
     /** The VM and installer controllers only exist when the new UI is selected. */
     private fun requireNewUi() {
@@ -285,6 +271,7 @@ class AppMethods(private val app: Application) {
             )
         ) {
             requireNewUi()
+            checkRunning()
             if (VmController.vmState.value.isAlive)
                 throw ApiException(ErrorCode.FAILED, "stop the VM before installing")
             if (Installer.installState.value.isStarted())
@@ -302,6 +289,7 @@ class AppMethods(private val app: Application) {
             )
         ) {
             requireNewUi()
+            checkRunning()
             if (VmController.vmState.value.isAlive)
                 throw ApiException(ErrorCode.FAILED, "stop the VM before upgrading")
             if (Installer.installState.value.isStarted())

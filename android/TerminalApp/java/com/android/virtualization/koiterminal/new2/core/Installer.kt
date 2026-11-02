@@ -147,6 +147,9 @@ object Installer {
             repositoryScope.launch {
                 try {
                     installInternal()
+                } catch (e: RuntimeException) {
+                    _installState.value =
+                        InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
                 } finally {
                     starting = false
                 }
@@ -187,6 +190,9 @@ object Installer {
                 } catch (e: IOException) {
                     _installState.value =
                         InstallState.Error(e, InstallState.ErrorCause.UninstallFailed)
+                } catch (e: RuntimeException) {
+                    _installState.value =
+                        InstallState.Error(e, InstallState.ErrorCause.InstallFailedUnknown)
                 } finally {
                     starting = false
                 }

@@ -37,6 +37,7 @@ class Updater(private val context: Context, private val log: DevdLog) {
         var received = 0L
         val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
         var verified: JSONObject? = null
+        var sha256Actual: String? = null
     }
 
     private var upload: Upload? = null
@@ -93,7 +94,11 @@ class Updater(private val context: Context, private val log: DevdLog) {
         val u = current(id)
         if (u.received != u.size)
             throw ApiException(ErrorCode.FAILED, "have ${u.received} of ${u.size} bytes")
-        val got = u.digest.digest().joinToString("") { "%02x".format(it) }
+        // Keep the digest result: verify() can throw and the client may retry
+        // commit with the same upload; a consumed MessageDigest would then
+        // produce an empty digest and a false mismatch.
+        val got = u.sha256Actual ?: u.digest.digest().joinToString("") { "%02x".format(it) }
+            .also { u.sha256Actual = it }
         if (got != u.sha256) {
             u.file.delete()
             upload = null

@@ -199,13 +199,57 @@ impl ClientCertVerifier for AnyClientCert {
     }
 }
 
+struct Connections {
+    map: Mutex<HashMap<u64, (TcpStream, String)>>,
+}
+
+impl Connections {
+    fn new() -> Self {
+        Self { map: Mutex::new(HashMap::new()) }
+    }
+
+    /// Registers a socket unless its listener was stopped while accepting.
+    fn insert(&self, id: u64, sock: TcpStream, key: String, stop: &AtomicBool) -> bool {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if stop.load(Ordering::Relaxed) {
+            let _ = sock.shutdown(std::net::Shutdown::Both);
+            false
+        } else {
+            map.insert(id, (sock, key));
+            true
+        }
+    }
+
+    fn remove(&self, id: u64) {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    fn close_key(&self, key: &str) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (sock, local)| {
+            if local == key {
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn close_all(&self) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, (sock, _)) in map.drain() {
+            let _ = sock.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
 struct Server {
     config: Arc<ServerConfig>,
     callback: Arc<Callback>,
     listeners: Mutex<HashMap<String, Arc<AtomicBool>>>,
     connections: Arc<AtomicUsize>,
-    /// Accepted sockets by id, with the local "addr:port" they arrived on.
-    open: Mutex<HashMap<u64, (TcpStream, String)>>,
+    open: Connections,
     stopped: AtomicBool,
 }
 
@@ -256,16 +300,10 @@ impl Server {
                     let Ok(shutdown) = sock.try_clone() else {
                         continue; // Never serve a connection we cannot close.
                     };
-                    {
-                        // Checking the listener token while holding `open` closes the
-                        // accept-versus-unbind race: unbind sets the token, then sweeps
-                        // this map under the same lock.
-                        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-                        if stop.load(Ordering::Relaxed) {
-                            let _ = shutdown.shutdown(std::net::Shutdown::Both);
-                            continue;
-                        }
-                        open.insert(id, (shutdown, key));
+                    // The insert checks the listener token under the same lock
+                    // that unbind uses, closing the accept-versus-unbind race.
+                    if !self.open.insert(id, shutdown, key, &stop) {
+                        continue;
                     }
                     self.connections.fetch_add(1, Ordering::Relaxed);
                     let server = self.clone();
@@ -273,11 +311,11 @@ impl Server {
                     let spawned =
                         std::thread::Builder::new().name("devd-conn".into()).spawn(move || {
                             server.serve(id, sock, listener_stop);
-                            server.open.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                            server.open.remove(id);
                             server.connections.fetch_sub(1, Ordering::Relaxed);
                         });
                     if spawned.is_err() {
-                        self.open.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                        self.open.remove(id);
                         self.connections.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
@@ -290,15 +328,7 @@ impl Server {
     }
 
     fn close_listener_connections(&self, key: &str) {
-        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        open.retain(|_, (sock, local)| {
-            if local == key {
-                let _ = sock.shutdown(std::net::Shutdown::Both);
-                false
-            } else {
-                true
-            }
-        });
+        self.open.close_key(key);
     }
 
     fn stop(&self) {
@@ -306,10 +336,7 @@ impl Server {
         for (_, stop) in self.listeners.lock().unwrap_or_else(|e| e.into_inner()).drain() {
             stop.store(true, Ordering::Relaxed);
         }
-        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, (sock, _)) in open.drain() {
-            let _ = sock.shutdown(std::net::Shutdown::Both);
-        }
+        self.open.close_all();
     }
 
     fn serve(&self, _id: u64, sock: TcpStream, listener_stop: Arc<AtomicBool>) {
@@ -423,7 +450,7 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_s
                     callback,
                     listeners: Mutex::new(HashMap::new()),
                     connections: Arc::new(AtomicUsize::new(0)),
-                    open: Mutex::new(HashMap::new()),
+                    open: Connections::new(),
                     stopped: AtomicBool::new(false),
                 }),
             );
@@ -536,5 +563,42 @@ mod tests {
         write_frame(&mut out, b"hello").unwrap();
         assert_eq!(&out[..4], &5u32.to_be_bytes());
         assert_eq!(&out[4..], b"hello");
+    }
+}
+
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn close_all_unblocks_the_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let set = Connections::new();
+        let stop = AtomicBool::new(false);
+        assert!(set.insert(1, server, "127.0.0.1:1".into(), &stop));
+        set.close_all();
+        let mut buf = [0u8; 1];
+        assert_eq!(client.read(&mut buf).unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn insert_refuses_a_stopped_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let set = Connections::new();
+        let stop = AtomicBool::new(true);
+        assert!(!set.insert(1, server, "127.0.0.1:1".into(), &stop));
+        let mut buf = [0u8; 1];
+        assert_eq!(client.read(&mut buf).unwrap_or(0), 0);
     }
 }

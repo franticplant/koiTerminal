@@ -494,7 +494,13 @@ class MainActivity : Activity() {
                 else append("not listening")
                 append("\nport ${app.settings.values.value.port}")
                 append(" · connections ${app.server.activeConnections}")
-                append("\nserver key ${app.server.fingerprint.take(16)}")
+                val fingerprint =
+                    try {
+                        app.server.fingerprint.take(16)
+                    } catch (e: Exception) {
+                        "unavailable"
+                    }
+                append("\nserver key $fingerprint")
                 for (b in binds) {
                     append("\n${b.iface}: ${b.state}")
                     b.address?.let { append(" $it") }

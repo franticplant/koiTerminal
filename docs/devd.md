@@ -85,6 +85,7 @@ koi-ctl -a <phone>:7391 call image.info
 koi-ctl -a <phone>:7391 call config.get
 koi-ctl -a <phone>:7391 call ports.setForwarding port=8080 enabled=true
 koi-ctl -a <phone>:7391 call app.restart
+koi-ctl -a <phone>:7391 wait vm.status vm.name running --timeout 60
 koi-ctl -a <phone>:7391 logs devd -f
 koi-ctl -a <phone>:7391 logs app
 koi-ctl -a <phone>:7391 update dist/koi-<version>-dev.apk
@@ -93,9 +94,12 @@ koi-ctl -a <phone>:7391 update dist/koi-devd-<version>.apk
 
 `update` uploads the APK in chunks, verifies its SHA-256, package allowlist,
 signer against `BuildConfig.PINNED_CERT_SHA256`, and refuses downgrades. The
-first install of the app (or a first devd install) needs one tap on the phone;
-after that devd is the update owner. A devd self-update ends the devd process
-and `RestoreReceiver` resumes the listener if it was on.
+first install of the app (or a first devd install) needs one tap on the phone.
+If devd performed that first app install, it becomes the installer of record
+and later updates are unattended. An app installed by adb first does not
+retroactively grant devd ownership; Android may still ask for one tap. A devd
+self-update ends the devd process and `RestoreReceiver` resumes the listener if
+it was on.
 
 ## Phone controls
 

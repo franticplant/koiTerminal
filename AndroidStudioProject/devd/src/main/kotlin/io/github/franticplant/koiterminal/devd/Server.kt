@@ -305,20 +305,8 @@ class Server(private val app: DevdApp) {
         return spec to spec.check(raw)
     }
 
-    private fun authorize(spec: MethodSpec, params: Params, pairing: Pairing) {
-        if (spec.scope !in pairing.scopes) {
-            throw ApiException(
-                ErrorCode.FORBIDDEN,
-                "${spec.name} needs scope '${spec.scope}'; this pairing has ${pairing.scopes.sorted()}",
-            )
-        }
-        if (params.hasSecret && Scope.SECRETS !in pairing.scopes) {
-            throw ApiException(
-                ErrorCode.FORBIDDEN,
-                "passing a secret parameter needs scope '${Scope.SECRETS}'",
-            )
-        }
-    }
+    private fun authorize(spec: MethodSpec, params: Params, pairing: Pairing) =
+        Policy.authorize(spec, params, pairing)
 
     private fun hello(pairing: Pairing?, clientId: String): JSONObject =
         JSONObject()
@@ -342,8 +330,12 @@ class Server(private val app: DevdApp) {
     private fun pair(conn: Conn, raw: JSONObject): JSONObject {
         val clientId = conn.clientId
         val name = raw.optString("name").ifBlank { "unnamed client" }
+        if (raw.has("scopes") && raw.optJSONArray("scopes") == null)
+            throw ApiException(ErrorCode.INVALID_PARAMS, "scopes must be a JSON array")
         val scopesRaw = raw.optJSONArray("scopes") ?: JSONArray(Scope.ALL)
         val scopes = (0 until scopesRaw.length()).map { scopesRaw.getString(it) }.toSet()
+        if (scopes.any { it !in Scope.ALL })
+            throw ApiException(ErrorCode.INVALID_PARAMS, "unknown scope in ${scopes.sorted()}")
         val code = Tls.pairingCode(serverCert, conn.clientCert)
         // Admission and creation happen under the lifecycle monitor. stop() holds
         // the same monitor while it disables `running` and denies the pending
@@ -403,6 +395,24 @@ class Server(private val app: DevdApp) {
         const val HANDSHAKE_TIMEOUT_MS = 10_000
         const val IDLE_TIMEOUT_MS = 10 * 60_000
         const val UNPAIRED_PER_MINUTE = 20
+    }
+}
+
+/** Authorization rules shared by the server and its host tests. */
+internal object Policy {
+    fun authorize(spec: MethodSpec, params: Params, pairing: Pairing) {
+        if (spec.scope !in pairing.scopes) {
+            throw ApiException(
+                ErrorCode.FORBIDDEN,
+                "${spec.name} needs scope '${spec.scope}'; this pairing has ${pairing.scopes.sorted()}",
+            )
+        }
+        if (params.hasSecret && Scope.SECRETS !in pairing.scopes) {
+            throw ApiException(
+                ErrorCode.FORBIDDEN,
+                "passing a secret parameter needs scope '${Scope.SECRETS}'",
+            )
+        }
     }
 }
 

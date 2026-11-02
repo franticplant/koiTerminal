@@ -77,16 +77,16 @@ jobs:
           scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
           scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
 
+      - name: Build unsigned APKs
+        env:
+          KOI_RELEASE_TAG: ${{ env.TAG }}
+        run: scripts/build all
+
       - name: JVM tests and lint
         run: |
           scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
             :devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
             lintDevRelease lintProdRelease :devd:lintRelease
-
-      - name: Build unsigned APKs
-        env:
-          KOI_RELEASE_TAG: ${{ env.TAG }}
-        run: scripts/build all
 
       - name: Release check (prod has no dev pieces)
         run: scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk

@@ -224,3 +224,74 @@ mod tests {
         assert_ne!(a, b);
     }
 }
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::store::Identity;
+    use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn server() -> (std::net::SocketAddr, String, std::thread::JoinHandle<()>) {
+        let cert = generate_simple_self_signed(vec!["koi-devd".into()]).unwrap();
+        let cert_der = cert.cert.der().to_vec();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(cert_der.clone())], key)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pin = sha256_hex(&cert_der);
+        let handle = thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let conn = ServerConnection::new(std::sync::Arc::new(config)).unwrap();
+            let mut tls = StreamOwned::new(conn, sock);
+            let mut hdr = [0u8; 4];
+            tls.read_exact(&mut hdr).unwrap();
+            let n = u32::from_be_bytes(hdr) as usize;
+            let mut buf = vec![0u8; n];
+            tls.read_exact(&mut buf).unwrap();
+            let req: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+            let reply = serde_json::json!({"id": req["id"], "result": {"ok": true}});
+            let bytes = serde_json::to_vec(&reply).unwrap();
+            tls.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+            tls.write_all(&bytes).unwrap();
+            tls.flush().unwrap();
+        });
+        (addr, pin, handle)
+    }
+
+    fn identity() -> Identity {
+        let cert = generate_simple_self_signed(vec!["laptop".into()]).unwrap();
+        Identity { cert_der: cert.cert.der().to_vec(), key_der: cert.signing_key.serialize_der() }
+    }
+
+    #[test]
+    fn pinned_tls_round_trip() {
+        let (addr, pin, handle) = server();
+        let mut c =
+            Conn::open(&format!("127.0.0.1:{}", addr.port()), &identity(), Some(pin)).unwrap();
+        let v = c.call("devd.hello", serde_json::json!({})).unwrap();
+        assert_eq!(v["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn wrong_pin_is_refused() {
+        let (addr, _pin, handle) = server();
+        let err = match Conn::open(
+            &format!("127.0.0.1:{}", addr.port()),
+            &identity(),
+            Some("00".repeat(32)),
+        ) {
+            Ok(_) => panic!("a wrong pin must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.message.contains("pinned"), "{err}");
+        let _ = handle.join();
+    }
+}

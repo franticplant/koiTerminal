@@ -43,6 +43,9 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
   image                   installed image metadata
   config                  the installed vm_config.json
   ports                   ports reported by the guest
+  wait METHOD FIELD VALUE [--timeout SEC] [k=v ...]
+                          poll until a JSON field equals VALUE, e.g.
+                          wait vm.status vm.name running
   doctor                  one pass over devd, packages, app, VM and installer
   forget                  drop the pinned devd certificate for the address
 
@@ -144,6 +147,7 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
         "image" => show(&ctx, "image.info"),
         "config" => show(&ctx, "config.get"),
         "ports" => show(&ctx, "ports.list"),
+        "wait" => wait(&ctx, &rest),
         "doctor" => doctor(&ctx),
         "update" => update(&ctx, &rest),
         "journal" => journal(&mut ctx),
@@ -270,6 +274,61 @@ fn group(ctx: &Ctx, prefix: &str, args: &[String], default: &str) -> Result<Exit
         return Err(format!("{prefix}: unknown action {action} (try: {})", allowed.join(", ")));
     }
     show(ctx, &format!("{prefix}.{action}"))
+}
+
+fn field<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = v;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
+}
+
+fn wait(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
+    if args.len() < 3 {
+        return Err("wait needs METHOD FIELD VALUE".into());
+    }
+    let method = &args[0];
+    let path = &args[1];
+    let expected = &args[2];
+    let mut timeout = Duration::from_secs(60);
+    let mut params = Map::new();
+    let mut i = 3;
+    while i < args.len() {
+        if args[i] == "--timeout" {
+            let secs = args
+                .get(i + 1)
+                .ok_or("--timeout needs a value")?
+                .parse::<u64>()
+                .map_err(|e| format!("--timeout: {e}"))?;
+            timeout = Duration::from_secs(secs.clamp(1, 3600));
+            i += 2;
+        } else if let Some((k, v)) = args[i].split_once('=') {
+            params.insert(k.into(), Value::String(v.into()));
+            i += 1;
+        } else {
+            return Err(format!("wait: unknown argument {}", args[i]));
+        }
+    }
+    let mut c = ctx.connect()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        let v = c.call(method, Value::Object(params.clone())).map_err(|e| e.to_string())?;
+        let got = field(&v, path)
+            .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+            .unwrap_or_default();
+        if got == *expected {
+            println!("{method} {path} = {got}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{method} {path} is {got:?}, expected {expected:?} after {}s",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn doctor(ctx: &Ctx) -> Result<ExitCode, String> {
@@ -469,6 +528,16 @@ fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
     }
 }
 
+fn find_install<'a>(list: &'a Value, install_id: Option<i64>, upload: &str) -> Option<&'a Value> {
+    list.as_array().into_iter().flatten().find(|r| {
+        if let Some(id) = install_id {
+            r["installId"].as_i64() == Some(id)
+        } else {
+            r["uploadId"].as_str() == Some(upload)
+        }
+    })
+}
+
 fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
     use base64::Engine;
     if apks.is_empty() {
@@ -507,7 +576,6 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             t0.elapsed().as_secs_f64()
         );
         let commit = c.call("update.commit", json!({ "uploadId": upload }));
-        let mut uncertain = false;
         let mut install_id = None;
         let mut self_update = false;
         match commit {
@@ -519,7 +587,6 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
                 // The commit may have reached devd before the socket died (a
                 // devd self-update does exactly that). Reconnect and look the
                 // upload up; never replay the commit.
-                uncertain = true;
                 eprintln!("{path}: connection lost during commit; reconciling by upload id");
             }
             Err(e) => return Err(format!("{path}: {e}")),
@@ -545,13 +612,7 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             let Ok(list) = c.call("update.status", json!({})) else {
                 continue;
             };
-            let Some(r) = list.as_array().into_iter().flatten().find(|r| {
-                if let Some(id) = install_id {
-                    r["installId"].as_i64() == Some(id)
-                } else {
-                    uncertain && r["uploadId"].as_str() == Some(upload.as_str())
-                }
-            }) else {
+            let Some(r) = find_install(&list, install_id, &upload) else {
                 continue;
             };
             if install_id.is_none() {
@@ -743,6 +804,27 @@ mod tests {
         assert_eq!(m["keys"], json!(["ctrl+c", "enter"]));
         assert_eq!(m["text"], json!("a=b"));
         assert!(parse_params(&["nope".into()]).is_err());
+    }
+
+    #[test]
+    fn finds_an_install_by_id_or_upload() {
+        let list = json!([
+            { "installId": 7, "uploadId": "a", "state": "installing" },
+            { "installId": 8, "uploadId": "b", "state": "success" }
+        ]);
+        assert_eq!(find_install(&list, Some(8), "a").unwrap()["uploadId"], "b");
+        assert_eq!(find_install(&list, None, "a").unwrap()["installId"], 7);
+        assert!(find_install(&list, Some(9), "a").is_none());
+        assert!(find_install(&list, None, "missing").is_none());
+    }
+
+    #[test]
+    fn field_paths() {
+        let v = json!({ "vm": { "name": "running" }, "n": 1 });
+        assert_eq!(field(&v, "vm.name"), Some(&json!("running")));
+        assert_eq!(field(&v, "n"), Some(&json!(1)));
+        assert_eq!(field(&v, "vm.missing"), None);
+        assert_eq!(field(&v, "missing"), None);
     }
 
     #[test]

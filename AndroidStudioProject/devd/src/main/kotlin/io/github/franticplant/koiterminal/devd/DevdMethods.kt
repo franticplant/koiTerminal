@@ -12,6 +12,7 @@ import io.github.franticplant.koiterminal.dev.api.int
 import io.github.franticplant.koiterminal.dev.api.long
 import io.github.franticplant.koiterminal.dev.api.method
 import io.github.franticplant.koiterminal.dev.api.str
+import io.github.franticplant.koiterminal.dev.api.strList
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -40,7 +41,7 @@ class DevdMethods(private val app: DevdApp) {
                     "Needs no pairing.",
                 true,
                 str("name", "A name for this client, shown on the phone."),
-                str("scopes", "The scopes asked for (a JSON array); the user may grant fewer."),
+                strList("scopes", "The scopes asked for; the user may grant fewer."),
             ),
         )
 
