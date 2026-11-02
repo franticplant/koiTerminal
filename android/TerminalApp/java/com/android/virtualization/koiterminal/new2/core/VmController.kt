@@ -89,7 +89,9 @@ object VmController {
             }
             .stateIn(
                 scope = repositoryScope,
-                started = SharingStarted.WhileSubscribed(5000),
+                // The dev API reads .value without subscribing; keep the
+                // controller's port snapshot current for headless callers too.
+                started = SharingStarted.Eagerly,
                 initialValue = emptyList(),
             )
 
@@ -118,9 +120,19 @@ object VmController {
         }
     }
 
-    fun enablePortForwarding(port: Int, enable: Boolean) {
-        _guestAgentController.value?.enablePortForwarding(port, enable)
+    fun enablePortForwarding(port: Int, enable: Boolean): Boolean {
+        val controller = _guestAgentController.value ?: return false
+        controller.enablePortForwarding(port, enable)
+        return true
     }
+
+    /** Whether the guest agent is up and can take shutdown/port calls. */
+    val guestAgentReady: Boolean
+        get() = _guestAgentController.value?.ready == true
+
+    /** Whether the koi guest service is up for tty resize calls. */
+    val koiServiceReady: Boolean
+        get() = _guestAgentController.value?.koiReady == true
 
     val graphicsAccelerationType: GraphicsManager.AccelerationType
         get() = GraphicsManager.getInstance(context).accelerationType
@@ -132,9 +144,7 @@ object VmController {
         GraphicsManager.getInstance(context).accelerationType = type
     }
 
-    fun shutdownVm() {
-        _guestAgentController.value?.shutdownVm()
-    }
+    fun shutdownVm(): Boolean = _guestAgentController.value?.shutdownVm() ?: false
 
     fun pullClipboardFromGuest() {
         _guestAgentController.value?.pullClipboardFromGuest()
@@ -148,14 +158,15 @@ object VmController {
         repositoryScope.launch { _sessionDiscarded.emit(sessionId) }
     }
 
-    fun resizeTtyWindow(columns: Int, rows: Int) {
+    fun resizeTtyWindow(columns: Int, rows: Int): Boolean {
+        val controller = _guestAgentController.value ?: return false
         val target = vmConfigJson?.getConsoleInputDevice() ?: ConfigJson.DEFAULT_CONSOLE_INPUT_DEVICE
         val targetEnum = when (target) {
             "hvc0" -> IkoiService.TTY_HVC0
             "ttyS0" -> IkoiService.TTY_TTYS0
             else -> IkoiService.TTY_HVC0
         }
-        _guestAgentController.value?.resizeTtyWindow(targetEnum, columns, rows)
+        return controller.resizeTtyWindow(targetEnum, columns, rows)
     }
 
     // It should add and then remove a display to reflect the change.
@@ -189,13 +200,20 @@ object VmController {
         }
     }
 
+    @Synchronized
     fun start() {
         if (_vmState.value is VmState.Running || _vmState.value is VmState.Starting) return
 
-        val intent = Intent(context, VmService::class.java)
-        context.startForegroundService(intent)
+        // Publish the transition before any asynchronous work, so a second
+        // caller cannot pass the state check while this one is starting.
+        _vmState.value = VmState.Starting
+        try {
+            context.startForegroundService(Intent(context, VmService::class.java))
+        } catch (e: RuntimeException) {
+            _vmState.value = VmState.Error(e)
+            return
+        }
         repositoryScope.launch {
-            _vmState.value = VmState.Starting
             try {
                 val image = InstalledImage.getDefault(context)
                 val json = ConfigJson.from(context, image.configPath)
@@ -543,11 +561,13 @@ object VmController {
         return buildId >= FIRST_VERSION_SUPPORTS_TTYD_VSOCK
     }
 
+    @Synchronized
     fun stop() {
         if (_vmState.value == VmState.Stopped || _vmState.value == VmState.Stopping) return
 
+        // Publish the transition synchronously; the stop itself is asynchronous.
+        _vmState.value = VmState.Stopping
         repositoryScope.launch {
-            _vmState.value = VmState.Stopping
             try {
                 virtualMachine?.stop()
             } catch (e: VirtualMachineException) {

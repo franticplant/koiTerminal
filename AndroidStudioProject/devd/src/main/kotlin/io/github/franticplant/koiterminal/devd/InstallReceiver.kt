@@ -17,12 +17,18 @@ class InstallReceiver : BroadcastReceiver() {
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 val confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                app.pendingInstall = confirm
+                if (confirm != null) app.pendingInstall = id to confirm
                 app.notifications.confirmInstall(id, confirm)
                 app.updater.finish(id, "pendingUserAction", "waiting for a tap on the phone")
             }
-            PackageInstaller.STATUS_SUCCESS -> app.updater.finish(id, "success", message)
-            else -> app.updater.finish(id, "failure", "status $status: $message")
+            PackageInstaller.STATUS_SUCCESS -> {
+                if (app.pendingInstall?.first == id) app.pendingInstall = null
+                app.updater.finish(id, "success", message)
+            }
+            else -> {
+                if (app.pendingInstall?.first == id) app.pendingInstall = null
+                app.updater.finish(id, "failure", "status $status: $message")
+            }
         }
     }
 

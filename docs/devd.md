@@ -80,7 +80,13 @@ koi-ctl -a <phone>:7391 status
 koi-ctl -a <phone>:7391 methods
 koi-ctl -a <phone>:7391 call vm.start
 koi-ctl -a <phone>:7391 call vm.status
-koi-ctl -a <phone>:7391 logs -f
+koi-ctl -a <phone>:7391 call installer.status
+koi-ctl -a <phone>:7391 call image.info
+koi-ctl -a <phone>:7391 call config.get
+koi-ctl -a <phone>:7391 call ports.setForwarding port=8080 enabled=true
+koi-ctl -a <phone>:7391 call app.restart
+koi-ctl -a <phone>:7391 logs devd -f
+koi-ctl -a <phone>:7391 logs app
 koi-ctl -a <phone>:7391 update dist/koi-<version>-dev.apk
 koi-ctl -a <phone>:7391 update dist/koi-devd-<version>.apk
 ```
@@ -90,6 +96,15 @@ signer against `BuildConfig.PINNED_CERT_SHA256`, and refuses downgrades. The
 first install of the app (or a first devd install) needs one tap on the phone;
 after that devd is the update owner. A devd self-update ends the devd process
 and `RestoreReceiver` resumes the listener if it was on.
+
+## Phone controls
+
+The main screen reports listener binds (including per-interface errors), port,
+active connections and the server key fingerprint, and shows app/devd versions,
+signers, installers and update owners. It can start the app, start/stop the VM,
+ask for a graceful shutdown and refresh the interface list. Pairing requests
+appear as a banner with a countdown, scope descriptions and read-only/update/
+all presets. Logs and metrics have their own screens.
 
 ## Security model
 

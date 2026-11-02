@@ -15,7 +15,7 @@ install=false
 target=x86_64-unknown-linux-musl
 if [[ ${KOI_HOST_TOOLCHAIN:-} == 1 ]]; then
 	(cd "$repo" && cargo build --release --locked --target "$target" --manifest-path dev/ctl/Cargo.toml)
-	out=$(cd "$repo" && cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+	out=$(cd "$repo/dev/ctl" && cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 	out=$out/$target/release/koi-ctl
 else
 	"$repo/scripts/run" cargo build --release --locked --target "$target" --manifest-path dev/ctl/Cargo.toml

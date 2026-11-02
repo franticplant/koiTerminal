@@ -85,6 +85,7 @@ class DevdService : Service() {
     private fun schedule(offAtMs: Long) {
         handler.removeCallbacks(autoOff)
         handler.postDelayed(autoOff, (offAtMs - System.currentTimeMillis()).coerceAtLeast(0))
+        AutoOffReceiver.schedule(this, offAtMs)
         app._offAtMs.value = offAtMs
         app.settings.rememberListener(offAtMs)
     }
@@ -93,6 +94,7 @@ class DevdService : Service() {
         // Switched off on purpose: nothing to resume.
         app.settings.rememberListener(null)
         handler.removeCallbacks(autoOff)
+        AutoOffReceiver.cancel(this)
         app.server.stop()
         app.metrics.stop()
         app.hooks.unbind()
@@ -103,6 +105,8 @@ class DevdService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(autoOff)
+        AutoOffReceiver.cancel(this)
+        app.settings.rememberListener(null)
         collector?.cancel()
         collector = null
         app.server.stop()
@@ -120,19 +124,32 @@ class DevdService : Service() {
         const val EXTRA_OFF_AT = "offAt"
 
         /** Resumes a listener that was on when this process ended (an update), until [offAtMs]. */
-        fun resume(context: Context, offAtMs: Long) =
-            context.startForegroundService(
-                Intent(context, DevdService::class.java)
-                    .setAction(ACTION_START)
-                    .putExtra(EXTRA_OFF_AT, offAtMs)
-            )
+        fun resume(context: Context, offAtMs: Long) {
+            try {
+                context.startForegroundService(
+                    Intent(context, DevdService::class.java)
+                        .setAction(ACTION_START)
+                        .putExtra(EXTRA_OFF_AT, offAtMs)
+                )
+            } catch (e: Exception) {
+                // Android may refuse a background FGS start. The listener stays
+                // down; the user can start it from devd.
+                android.util.Log.e("devd", "could not resume the listener", e)
+            }
+        }
 
         fun start(context: Context) =
             context.startForegroundService(
                 Intent(context, DevdService::class.java).setAction(ACTION_START)
             )
 
-        fun stop(context: Context) =
-            context.startService(Intent(context, DevdService::class.java).setAction(ACTION_STOP))
+        /**
+         * Stops an already running service. stopService is safe from a
+         * background alarm receiver, unlike startService; onDestroy tears the
+         * listener down.
+         */
+        fun stop(context: Context) {
+            context.stopService(Intent(context, DevdService::class.java).setAction(ACTION_STOP))
+        }
     }
 }

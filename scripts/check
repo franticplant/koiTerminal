@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Host-side verification: everything that can be checked without a phone.
+#
+#   scripts/check            run all checks
+#   scripts/check --fast     skip the full APK build (uses existing outputs)
+#
+# This is deliberately the same set CI runs. It never signs and never needs a
+# device; a signed-artifact check belongs to scripts/sign.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo"
+fast=false
+[[ ${1:-} == --fast ]] && fast=true
+
+echo "== rust format =="
+scripts/run cargo fmt --manifest-path dev/ctl/Cargo.toml -- --check
+
+echo "== rust lints =="
+scripts/run cargo clippy --manifest-path dev/ctl/Cargo.toml --all-targets --locked -- -D warnings
+scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+
+echo "== rust tests =="
+scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
+scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
+
+echo "== prepare Android SDK and JNI =="
+scripts/run bash -c 'cd AndroidStudioProject && ./tools/setup.sh && ./tools/build_rust.sh'
+
+echo "== JVM tests and lint =="
+scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
+	:devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
+	lintDevRelease lintProdRelease :devd:lintRelease
+
+if $fast; then
+	echo "== skipped APK build (--fast) =="
+else
+	echo "== APK build =="
+	scripts/build all
+fi
+
+echo "== structural release checks =="
+scripts/run scripts/check-release-apk.sh --unsigned \
+	AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
+scripts/run scripts/check-release-apk.sh --unsigned --expect-dev \
+	AndroidStudioProject/app/build/outputs/apk/dev/release/*.apk
+scripts/run scripts/check-release-apk.sh --unsigned --devd \
+	AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+
+echo "== koi-ctl =="
+scripts/ctl
+
+echo "ok: host checks passed"

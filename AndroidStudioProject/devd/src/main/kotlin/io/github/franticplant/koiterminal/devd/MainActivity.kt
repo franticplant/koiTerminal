@@ -15,6 +15,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.ArrayAdapter
 import android.widget.TextView
+import io.github.franticplant.koiterminal.dev.api.DevIds
 import java.text.DateFormat
 import java.util.Date
 import org.json.JSONObject
@@ -39,12 +40,45 @@ class MainActivity : Activity() {
     private var renderedPairing: PairingRequest? = null
     private lateinit var installStatus: TextView
     private lateinit var installBox: LinearLayout
+    private lateinit var controlsStatus: TextView
+    private lateinit var controlsBox: LinearLayout
+    private lateinit var pairingDetail: TextView
+    private lateinit var pairingBanner: TextView
+    @Volatile private var busy = false
+    @Volatile private var lastControlResult: String? = null
+    @Volatile private var recentInstalls: String = ""
 
     private val refresh =
         object : Runnable {
             override fun run() {
                 render()
                 handler.postDelayed(this, 2_000)
+            }
+        }
+
+    private val installsRefresh =
+        object : Runnable {
+            override fun run() {
+                Thread {
+                        val text =
+                            try {
+                                val installs = app.updater.status()
+                                (0 until minOf(3, installs.length())).joinToString("\n") { i ->
+                                    val r = installs.getJSONObject(i)
+                                    "  ${r.optString("package")} ${r.optString("versionName")} " +
+                                        "${r.optString("state")}" +
+                                        (r.optString("message").takeIf { it.isNotEmpty() }?.let {
+                                            " ($it)"
+                                        } ?: "")
+                                }
+                            } catch (e: Exception) {
+                                "  status error: ${e.message ?: e.javaClass.simpleName}"
+                            }
+                        recentInstalls = text
+                        runOnUiThread { if (!isFinishing && !isDestroyed) render() }
+                    }
+                    .start()
+                handler.postDelayed(this, 5_000)
             }
         }
 
@@ -64,10 +98,26 @@ class MainActivity : Activity() {
         if (permissions.isNotEmpty()) requestPermissions(permissions.toTypedArray(), 1)
         setContentView(build())
         handler.post(refresh)
+        handler.post(installsRefresh)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.removeCallbacks(refresh)
+        handler.removeCallbacks(installsRefresh)
+        handler.post(refresh)
+        handler.post(installsRefresh)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refresh)
+        handler.removeCallbacks(installsRefresh)
+        super.onPause()
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(refresh)
+        handler.removeCallbacks(installsRefresh)
         super.onDestroy()
     }
 
@@ -112,6 +162,68 @@ class MainActivity : Activity() {
         }
         root.addView(addresses)
 
+        pairingBanner = TextView(this).apply {
+            textSize = 15f
+            setPadding(16, 16, 16, 16)
+            visibility = View.GONE
+            setBackgroundColor(0x33ffcc00)
+        }
+        root.addView(pairingBanner)
+
+        root.addView(section("koiTerminal"))
+        controlsStatus = TextView(this).apply {
+            textSize = 13f
+            setPadding(0, 0, 0, 8)
+        }
+        root.addView(controlsStatus)
+        controlsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(controlsBox)
+        controlsBox.addView(
+            buttonRow(
+                "Start app" to { callApp("app.info") },
+                "VM status" to { callApp("vm.status") },
+                "Refresh" to { callApp("app.info") },
+            )
+        )
+        controlsBox.addView(
+            buttonRow(
+                "VM start" to { callApp("vm.start") },
+                "VM stop" to { callApp("vm.stop") },
+            )
+        )
+        controlsBox.addView(
+            buttonRow(
+                "Graceful shutdown" to { callApp("vm.shutdown") },
+                "Restart app" to { callDevd("app.restart") },
+                "Interfaces" to { recreate() },
+            )
+        )
+        controlsBox.addView(
+            Button(this).apply {
+                text = "Open koiTerminal"
+                setOnClickListener {
+                    val intent = packageManager.getLaunchIntentForPackage(DevIds.KOI_PACKAGE)
+                    if (intent == null) {
+                        android.widget.Toast.makeText(
+                            this@MainActivity,
+                            "koiTerminal is not installed",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    } else {
+                        startActivity(intent)
+                    }
+                }
+            }
+        )
+        root.addView(
+            Button(this).apply {
+                text = "Show logs"
+                setOnClickListener {
+                    startActivity(android.content.Intent(this@MainActivity, LogsActivity::class.java))
+                }
+            }
+        )
+
         root.addView(section("Auto-off"))
         autoOff =
             Spinner(this).apply {
@@ -141,6 +253,12 @@ class MainActivity : Activity() {
                     }
             }
         root.addView(autoOff)
+        root.addView(
+            TextView(this).apply {
+                text = "Applies to the next start; use +1 hour in the notification to extend."
+                textSize = 11f
+            }
+        )
 
         loopback =
             CheckBox(this).apply {
@@ -191,6 +309,8 @@ class MainActivity : Activity() {
         )
 
         root.addView(section("Pairing request"))
+        pairingDetail = TextView(this).apply { textSize = 13f }
+        root.addView(pairingDetail)
         pairingBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(pairingBox)
 
@@ -238,27 +358,158 @@ class MainActivity : Activity() {
             setPadding(0, 28, 0, 8)
         }
 
+    private fun buttonRow(vararg buttons: Pair<String, () -> Unit>): LinearLayout {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((label, action) in buttons) {
+            row.addView(
+                Button(this).apply {
+                    text = label
+                    setOnClickListener { if (!busy) action() }
+                }
+            )
+        }
+        return row
+    }
+
+    /** Runs a devd-owned method off the UI thread. */
+    private fun callDevd(method: String) {
+        if (busy) return
+        busy = true
+        controlsStatus.text = "$method…"
+        Thread {
+            val outcome =
+                try {
+                    val reply = app.methods.table.call(method, JSONObject())
+                    val err = reply.optJSONObject("error")
+                    if (err != null) {
+                        "error ${err.optString("code")}: ${err.optString("message")}"
+                    } else {
+                        val result = reply.optJSONObject("result")
+                        if (method == "app.restart")
+                            "pid ${result?.optInt("oldPid")} -> ${result?.optInt("newPid")}"
+                        else "ok"
+                    }
+                } catch (e: Exception) {
+                    "error: ${e.message ?: e.javaClass.simpleName}"
+                }
+            runOnUiThread {
+                busy = false
+                lastControlResult = "$method: $outcome"
+                if (!isFinishing && !isDestroyed) render()
+            }
+        }.start()
+    }
+
+    /** Runs a DevHooks call off the UI thread; Binder and packaging can block. */
+    private fun callApp(method: String) {
+        if (busy) return
+        busy = true
+        controlsStatus.text = "$method…"
+        Thread {
+            val outcome =
+                try {
+                    app.hooks.get(10_000)
+                    val reply = app.hooks.call(method, JSONObject())
+                    val err = reply.optJSONObject("error")
+                    if (err != null) {
+                        "error ${err.optString("code")}: ${err.optString("message")}"
+                    } else {
+                        val result = reply.optJSONObject("result")
+                        when (method) {
+                            "app.info" ->
+                                "pid ${result?.optInt("pid")} ${result?.optString("versionName")}"
+                            "vm.status" -> {
+                                val vm = result?.optJSONObject("vm")?.optString("name")
+                                val install = result?.optJSONObject("install")?.optString("name")
+                                "vm $vm, install $install"
+                            }
+                            "vm.start",
+                            "vm.stop",
+                            "vm.shutdown",
+                            "vm.reset" -> result?.optString("name") ?: "ok"
+                            "app.restart" ->
+                                "pid ${result?.optInt("oldPid")} -> ${result?.optInt("newPid")}"
+                            else -> "ok"
+                        }
+                    }
+                } catch (e: Exception) {
+                    "error: ${e.message ?: e.javaClass.simpleName}"
+                }
+            runOnUiThread {
+                busy = false
+                lastControlResult = "$method: $outcome"
+                if (!isFinishing && !isDestroyed) render()
+            }
+        }.start()
+    }
+
+    private fun packageLine(pkg: String): String {
+        val info =
+            try {
+                packageManager.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+            } catch (e: PackageManager.NameNotFoundException) {
+                return "$pkg: not installed"
+            }
+        val signer =
+            info.signingInfo?.apkContentsSigners?.firstOrNull()?.let { Tls.sha256Hex(it.toByteArray()) }
+        val pinned = signer != null && signer == BuildConfig.PINNED_CERT_SHA256
+        val source =
+            try {
+                packageManager.getInstallSourceInfo(pkg)
+            } catch (e: Exception) {
+                null
+            }
+        return "$pkg ${info.versionName} (${info.longVersionCode})" +
+            " signer ${if (pinned) "pinned" else "NOT pinned"}" +
+            (source?.installingPackageName?.let { " from $it" } ?: "") +
+            (source?.updateOwnerPackageName?.let { " owner $it" } ?: "")
+    }
+
     private fun render() {
+        val req = app.pairings.pending.value
+        pairingBanner.visibility = if (req == null) View.GONE else View.VISIBLE
+        if (req != null) {
+            pairingBanner.text =
+                "Pairing request from ${req.name}: code ${req.code}. Open the Pairing section below."
+        }
         val offAt = app.offAtMs.value
-        val running = offAt != null || app.server.addresses.value.isNotEmpty()
+        val listening = app.server.addresses.value.isNotEmpty()
+        val starting = offAt != null && !listening
         status.text =
-            if (running) "Listener: on" +
-                (offAt?.let {
-                    " until " + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it))
-                } ?: "")
-            else "Listener: off"
-        toggle.text = if (running) "Stop listener" else "Start listener"
+            when {
+                listening ->
+                    "Listener: on" +
+                        (offAt?.let {
+                            " until " + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it))
+                        } ?: "")
+                starting -> "Listener: starting"
+                else -> "Listener: off"
+            }
+        toggle.text = if (offAt != null || listening) "Stop listener" else "Start listener"
+        val binds = app.server.binds.value
         addresses.text =
-            app.server.addresses.value.joinToString("\n").ifEmpty {
-                if (running) "starting…" else "not listening"
+            buildString {
+                if (listening) append(app.server.addresses.value.joinToString("\n"))
+                else if (starting) append("starting…")
+                else append("not listening")
+                append("\nport ${app.settings.values.value.port}")
+                append(" · connections ${app.server.activeConnections}")
+                append("\nserver key ${app.server.fingerprint.take(16)}")
+                for (b in binds) {
+                    append("\n${b.iface}: ${b.state}")
+                    b.address?.let { append(" $it") }
+                    if (b.detail.isNotEmpty()) append(" — ${b.detail}")
+                }
             }
 
+        val recent = recentInstalls
         installStatus.text =
-            if (app.packageManager.canRequestPackageInstalls())
+            (if (app.packageManager.canRequestPackageInstalls())
                 "Allowed: devd can install koiTerminal packages."
-            else "Not allowed: Android will ask for a tap, or enable it here."
+            else "Not allowed: Android will ask for a tap, or enable it here.") +
+                (if (recent.isNotEmpty()) "\nrecent installs:\n$recent" else "")
         installBox.removeAllViews()
-        app.pendingInstall?.let { confirm ->
+        app.pendingInstall?.let { (installId, confirm) ->
             installStatus.text = "Android needs a tap to finish the install."
             installBox.addView(
                 Button(this).apply {
@@ -266,7 +517,7 @@ class MainActivity : Activity() {
                     setOnClickListener {
                         try {
                             startActivity(confirm)
-                            app.pendingInstall = null
+                            if (app.pendingInstall?.first == installId) app.pendingInstall = null
                         } catch (e: Exception) {
                             android.widget.Toast.makeText(
                                 this@MainActivity,
@@ -279,7 +530,20 @@ class MainActivity : Activity() {
             )
         }
 
-        val req = app.pairings.pending.value
+        controlsStatus.text =
+            packageLine(DevIds.KOI_PACKAGE) + "\n" +
+                packageLine(DevIds.DEVD_PACKAGE) + "\n" +
+                "hooks: " + (if (app.hooks.connected) "connected" else "not connected") +
+                (lastControlResult?.let { "\nlast command: $it" } ?: "")
+
+        pairingDetail.text =
+            if (req == null) ""
+            else {
+                val left = ((req.createdMs + Pairings.REQUEST_TIMEOUT_MS - System.currentTimeMillis()) / 1000)
+                    .coerceAtLeast(0)
+                "code ${req.code} · from ${req.peer} on ${req.local} · " +
+                    "client ${req.clientId.take(16)} · expires in ${left}s"
+            }
         if (req !== renderedPairing) {
             renderedPairing = req
             pairingBox.removeAllViews()
@@ -299,16 +563,49 @@ class MainActivity : Activity() {
                         textSize = 14f
                     }
                 )
+                val help =
+                    mapOf(
+                        "read" to "state, logs, metrics",
+                        "read.content" to "terminal/screen content",
+                        "operate" to "VM start/stop, console size, ports",
+                        "secrets" to "credentials (none used yet)",
+                        "lifecycle" to "restart the app",
+                        "scenario" to "test scenarios",
+                        "update" to "install app and devd APKs",
+                    )
                 val chosen = LinkedHashMap<String, CheckBox>()
                 for (scope in req.requestedScopes.sorted()) {
                     val cb =
                         CheckBox(this@MainActivity).apply {
-                            text = scope
+                            text = "$scope — ${help[scope] ?: "additional access"}"
                             isChecked = true
                         }
                     chosen[scope] = cb
                     pairingBox.addView(cb)
                 }
+                fun choose(scopes: Set<String>) {
+                    chosen.forEach { (scope, cb) -> cb.isChecked = scope in scopes }
+                }
+                val presets = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                presets.addView(
+                    Button(this@MainActivity).apply {
+                        text = "Read-only"
+                        setOnClickListener { choose(setOf("read")) }
+                    }
+                )
+                presets.addView(
+                    Button(this@MainActivity).apply {
+                        text = "Update only"
+                        setOnClickListener { choose(setOf("update")) }
+                    }
+                )
+                presets.addView(
+                    Button(this@MainActivity).apply {
+                        text = "All requested"
+                        setOnClickListener { choose(req.requestedScopes) }
+                    }
+                )
+                pairingBox.addView(presets)
                 val days =
                     Spinner(this@MainActivity).apply {
                         adapter =

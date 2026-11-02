@@ -89,9 +89,7 @@ impl ServerCertVerifier for Pinned {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -115,10 +113,7 @@ impl std::fmt::Display for CallError {
 }
 
 fn local(message: impl Into<String>) -> CallError {
-    CallError {
-        code: "local".into(),
-        message: message.into(),
-    }
+    CallError { code: "local".into(), message: message.into() }
 }
 
 impl Conn {
@@ -126,11 +121,8 @@ impl Conn {
     /// and recorded (pairing); otherwise it must match.
     pub fn open(addr: &str, id: &Identity, pin: Option<String>) -> Result<Conn, CallError> {
         let provider = Arc::new(provider::default_provider());
-        let verifier = Arc::new(Pinned {
-            expected: pin,
-            seen: Mutex::new(None),
-            provider: provider.clone(),
-        });
+        let verifier =
+            Arc::new(Pinned { expected: pin, seen: Mutex::new(None), provider: provider.clone() });
         let config = ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| local(format!("TLS setup: {e}")))?
@@ -147,12 +139,9 @@ impl Conn {
             .next()
             .ok_or_else(|| local(format!("{addr}: no address")))?;
         let tcp = TcpStream::connect_timeout(&sockaddr, Duration::from_secs(10)).map_err(|e| {
-            local(format!(
-                "cannot connect to {addr}: {e} (is devd's listener on?)"
-            ))
+            local(format!("cannot connect to {addr}: {e} (is devd's listener on?)"))
         })?;
-        tcp.set_read_timeout(Some(Duration::from_secs(15 * 60)))
-            .ok();
+        tcp.set_read_timeout(Some(Duration::from_secs(15 * 60))).ok();
         tcp.set_nodelay(true).ok();
         let name = ServerName::try_from("koi-devd").map_err(|e| local(e.to_string()))?;
         let conn = ClientConnection::new(Arc::new(config), name)
@@ -170,11 +159,12 @@ impl Conn {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| local("no server certificate"))?;
-        Ok(Conn {
-            stream,
-            next_id: 1,
-            server_cert,
-        })
+        Ok(Conn { stream, next_id: 1, server_cert })
+    }
+
+    /// Sets the socket read timeout, e.g. for bounded recovery polling.
+    pub fn set_read_timeout(&mut self, d: Duration) {
+        let _ = self.stream.sock.set_read_timeout(Some(d));
     }
 
     /// Calls `method` and returns its result, or devd's error.
@@ -206,5 +196,31 @@ impl Conn {
             });
         }
         Ok(reply["result"].take())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_known_vector() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn pairing_code_is_six_digits_and_order_sensitive() {
+        let a = pairing_code(b"server", b"client");
+        let b = pairing_code(b"client", b"server");
+        assert_eq!(a.len(), 6);
+        assert!(a.chars().all(|c| c.is_ascii_digit()));
+        assert_ne!(a, b);
     }
 }

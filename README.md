@@ -46,6 +46,15 @@ Once this repo is in a more presentable state (>=3 distros successfully supporte
     - Changing font size :)
     - Booting from installation media using u-boot (instructions to come) <!-- UPDATE -->
 
+## Development control plane (this fork)
+
+The standalone Android Studio build has a separate `devd` package that drives
+the app over mutually authenticated TLS: pairing with scopes, a hash-chained
+journal, logs, metrics and an updater for the app and for devd itself. The
+phone side has a listener/pairing/package dashboard; the laptop side is
+`koi-ctl`. See [`docs/devd.md`](docs/devd.md) for the pieces, bootstrap and
+security model.
+
 ## Disclaimers
 - Proof-of-concept alpha test-build software, provided AS-IS. Beware of sharp edges, and back up often. You have been warned.
 - The app is only tested on newer devices running the latest GrapheneOS (and One UI 8.5 at one point), so it would be nice to know if it works for other OSes.

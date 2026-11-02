@@ -27,6 +27,7 @@ class DevHooksService : Service() {
         object : IDevHooks.Stub() {
             override fun catalog(): String {
                 checkCaller()
+                DevLog.add("debug", "api", "catalog")
                 return MethodSpec.catalogJson(methods.table.specs)
             }
 
@@ -39,7 +40,14 @@ class DevHooksService : Service() {
                         return Reply.error(ErrorCode.INVALID_PARAMS, "params are not a JSON object")
                             .toString()
                     }
-                return methods.table.call(method, params).toString()
+                val reply = methods.table.call(method, params)
+                val error = reply.optJSONObject("error")?.optString("code")
+                DevLog.add(
+                    if (error == null) "info" else "warn",
+                    "api",
+                    "$method -> ${error ?: "ok"}",
+                )
+                return reply.toString()
             }
         }
 

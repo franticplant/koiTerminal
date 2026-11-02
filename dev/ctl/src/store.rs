@@ -41,13 +41,7 @@ fn read_secret() -> Result<Option<String>, String> {
             .map_err(|e| format!("cannot read KOI_CTL_KEY_FILE {path}: {e}"));
     }
     let out = Command::new("secret-tool")
-        .args([
-            "lookup",
-            "service",
-            SECRET_SERVICE,
-            "account",
-            SECRET_ACCOUNT,
-        ])
+        .args(["lookup", "service", SECRET_SERVICE, "account", SECRET_ACCOUNT])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| {
@@ -118,9 +112,7 @@ pub fn identity(name: &str) -> Result<Identity, String> {
             params.distinguished_name.push(DnType::CommonName, name);
             params.not_before = rcgen::date_time_ymd(2025, 1, 1);
             params.not_after = rcgen::date_time_ymd(2125, 1, 1);
-            let cert = params
-                .self_signed(&key)
-                .map_err(|e| format!("certificate: {e}"))?;
+            let cert = params.self_signed(&key).map_err(|e| format!("certificate: {e}"))?;
             std::fs::create_dir_all(dir()?)
                 .map_err(|e| format!("cannot create config dir: {e}"))?;
             std::fs::write(&cert_path, cert.pem())
@@ -128,19 +120,12 @@ pub fn identity(name: &str) -> Result<Identity, String> {
             cert.der().to_vec()
         }
     };
-    Ok(Identity {
-        cert_der,
-        key_der: key.serialize_der(),
-    })
+    Ok(Identity { cert_der, key_der: key.serialize_der() })
 }
 
 fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
-    let body: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<Vec<_>>()
-        .concat();
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect::<Vec<_>>().concat();
     base64::engine::general_purpose::STANDARD
         .decode(body)
         .map_err(|e| format!("bad certificate file: {e}"))
@@ -171,10 +156,7 @@ impl Hosts {
     }
 
     pub fn pin(&self, addr: &str) -> Option<String> {
-        self.pins
-            .get(addr)
-            .and_then(|v| v["serverCertSha256"].as_str())
-            .map(str::to_string)
+        self.pins.get(addr).and_then(|v| v["serverCertSha256"].as_str()).map(str::to_string)
     }
 
     pub fn save(&self) -> Result<(), String> {

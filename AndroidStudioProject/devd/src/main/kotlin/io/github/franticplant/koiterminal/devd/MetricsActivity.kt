@@ -50,6 +50,17 @@ class MetricsActivity : Activity() {
         handler.post(refresh)
     }
 
+    override fun onResume() {
+        super.onResume()
+        handler.removeCallbacks(refresh)
+        handler.post(refresh)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refresh)
+        super.onPause()
+    }
+
     override fun onDestroy() {
         handler.removeCallbacks(refresh)
         super.onDestroy()
@@ -62,9 +73,11 @@ class MetricsActivity : Activity() {
             return
         }
         val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+        val age = System.currentTimeMillis() - m.optLong("unixMs")
         view.text =
             buildString {
                 append("${fmt.format(Date(m.optLong("unixMs")))}  ")
+                if (age > 10_000) append("STALE (${age / 1000}s)  ")
                 append("koi app: ")
                 append(if (m.optBoolean("koiConnected")) "connected" else "not bound")
                 append("\n\n")

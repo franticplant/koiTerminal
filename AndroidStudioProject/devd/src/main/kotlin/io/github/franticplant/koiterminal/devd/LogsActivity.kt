@@ -1,12 +1,16 @@
 package io.github.franticplant.koiterminal.devd
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -22,8 +26,12 @@ class LogsActivity : Activity() {
         get() = application as DevdApp
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var view: TextView
+    private lateinit var scroll: ScrollView
+    private lateinit var component: EditText
+    private lateinit var grep: EditText
     private var kind = "log"
     private var level = "debug"
+    private var paused = false
 
     private val refresh =
         object : Runnable {
@@ -92,6 +100,43 @@ class LogsActivity : Activity() {
             }
         )
         root.addView(controls)
+        val filters = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        component =
+            EditText(this).apply {
+                hint = "component"
+                setSingleLine()
+            }
+        grep =
+            EditText(this).apply {
+                hint = "grep"
+                setSingleLine()
+            }
+        filters.addView(component)
+        filters.addView(grep)
+        filters.addView(
+            Button(this).apply {
+                text = "Apply"
+                setOnClickListener { render() }
+            }
+        )
+        root.addView(filters)
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(
+            CheckBox(this).apply {
+                text = "Pause"
+                setOnCheckedChangeListener { _, checked -> paused = checked }
+            }
+        )
+        actions.addView(
+            Button(this).apply {
+                text = "Copy"
+                setOnClickListener {
+                    getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("koi devd logs", view.text))
+                }
+            }
+        )
+        root.addView(actions)
         view =
             TextView(this).apply {
                 textSize = 11f
@@ -99,9 +144,21 @@ class LogsActivity : Activity() {
                 setTextIsSelectable(true)
                 gravity = Gravity.START
             }
-        root.addView(ScrollView(this).apply { addView(view) })
+        scroll = ScrollView(this).apply { addView(view) }
+        root.addView(scroll)
         setContentView(root)
         handler.post(refresh)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.removeCallbacks(refresh)
+        handler.post(refresh)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refresh)
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -110,7 +167,17 @@ class LogsActivity : Activity() {
     }
 
     private fun render() {
-        val entries = app.journal.tail(500, JournalFilter.of(kind, level, null, null))
+        if (paused) return
+        val entries =
+            app.journal.tail(
+                500,
+                JournalFilter.of(
+                    kind,
+                    level,
+                    component.text.toString().takeIf { it.isNotEmpty() },
+                    grep.text.toString().takeIf { it.isNotEmpty() },
+                ),
+            )
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
         view.text =
             buildString {
@@ -131,5 +198,6 @@ class LogsActivity : Activity() {
                     }
                 }
             }
+        scroll.post { scroll.fullScroll(android.view.View.FOCUS_DOWN) }
     }
 }

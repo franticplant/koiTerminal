@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -204,11 +204,15 @@ struct Server {
     callback: Arc<Callback>,
     listeners: Mutex<HashMap<String, Arc<AtomicBool>>>,
     connections: Arc<AtomicUsize>,
+    /// Accepted sockets by id, with the local "addr:port" they arrived on.
+    open: Mutex<HashMap<u64, (TcpStream, String)>>,
+    stopped: AtomicBool,
 }
 
 static SERVERS: LazyLock<Mutex<HashMap<jlong, Arc<Server>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT: AtomicI64 = AtomicI64::new(1);
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 fn servers() -> std::sync::MutexGuard<'static, HashMap<jlong, Arc<Server>>> {
     SERVERS.lock().unwrap_or_else(|e| e.into_inner())
@@ -216,23 +220,18 @@ fn servers() -> std::sync::MutexGuard<'static, HashMap<jlong, Arc<Server>>> {
 
 impl Server {
     fn bind(self: &Arc<Self>, addr: SocketAddr) -> Result<(), String> {
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err("the server is stopped".into());
+        }
         let key = addr.to_string();
-        if self
-            .listeners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(&key)
-        {
+        if self.listeners.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key) {
             return Ok(());
         }
         let listener = TcpListener::bind(addr).map_err(|e| e.to_string())?;
         // Non-blocking, polled, so unbind can stop the loop.
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let stop = Arc::new(AtomicBool::new(false));
-        self.listeners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.clone(), stop.clone());
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), stop.clone());
         let server = self.clone();
         std::thread::Builder::new()
             .name(format!("devd-accept-{key}"))
@@ -245,19 +244,40 @@ impl Server {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((sock, _)) => {
+                    if self.stopped.load(Ordering::Relaxed) {
+                        let _ = sock.shutdown(std::net::Shutdown::Both);
+                        continue;
+                    }
                     if self.connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
                         continue; // Dropped: closed.
                     }
+                    let id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
+                    let key = sock.local_addr().map(|a| a.to_string()).unwrap_or_default();
+                    let Ok(shutdown) = sock.try_clone() else {
+                        continue; // Never serve a connection we cannot close.
+                    };
+                    {
+                        // Checking the listener token while holding `open` closes the
+                        // accept-versus-unbind race: unbind sets the token, then sweeps
+                        // this map under the same lock.
+                        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+                        if stop.load(Ordering::Relaxed) {
+                            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+                            continue;
+                        }
+                        open.insert(id, (shutdown, key));
+                    }
                     self.connections.fetch_add(1, Ordering::Relaxed);
                     let server = self.clone();
+                    let listener_stop = stop.clone();
                     let spawned =
-                        std::thread::Builder::new()
-                            .name("devd-conn".into())
-                            .spawn(move || {
-                                server.serve(sock);
-                                server.connections.fetch_sub(1, Ordering::Relaxed);
-                            });
+                        std::thread::Builder::new().name("devd-conn".into()).spawn(move || {
+                            server.serve(id, sock, listener_stop);
+                            server.open.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                            server.connections.fetch_sub(1, Ordering::Relaxed);
+                        });
                     if spawned.is_err() {
+                        self.open.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                         self.connections.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
@@ -269,7 +289,33 @@ impl Server {
         }
     }
 
-    fn serve(&self, sock: TcpStream) {
+    fn close_listener_connections(&self, key: &str) {
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        open.retain(|_, (sock, local)| {
+            if local == key {
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        for (_, stop) in self.listeners.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, (sock, _)) in open.drain() {
+            let _ = sock.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn serve(&self, _id: u64, sock: TcpStream, listener_stop: Arc<AtomicBool>) {
+        if self.stopped.load(Ordering::Relaxed) || listener_stop.load(Ordering::Relaxed) {
+            return;
+        }
         let local = sock.local_addr().map(|a| a.to_string()).unwrap_or_default();
         let peer = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         let _ = sock.set_nonblocking(false);
@@ -294,23 +340,30 @@ impl Server {
         };
         let _ = tls.sock.set_read_timeout(Some(IDLE_TIMEOUT));
         loop {
+            if self.stopped.load(Ordering::Relaxed) || listener_stop.load(Ordering::Relaxed) {
+                return;
+            }
             let mut hdr = [0u8; 4];
             if tls.read_exact(&mut hdr).is_err() {
                 return;
             }
-            let n = u32::from_be_bytes(hdr) as usize;
-            let reply = if n == 0 || n > MAX_FRAME {
+            let Some(n) = validate_len(u32::from_be_bytes(hdr) as usize) else {
                 let r = format!(
-                    r#"{{"id":null,"error":{{"code":"invalid_params","message":"frame of {n} bytes (limit {MAX_FRAME})"}}}}"#
+                    r#"{{"id":null,"error":{{"code":"invalid_params","message":"frame is empty or larger than {MAX_FRAME} bytes"}}}}"#
                 );
                 let _ = write_frame(&mut tls, r.as_bytes());
                 return;
-            } else {
+            };
+            let reply = {
                 let mut buf = vec![0u8; n];
                 if tls.read_exact(&mut buf).is_err() {
                     return;
                 }
                 match String::from_utf8(buf) {
+                    Ok(_json)
+                        if self.stopped.load(Ordering::Relaxed)
+                            || listener_stop.load(Ordering::Relaxed) =>
+                        return,
                     Ok(json) => self.callback.request(&client, &local, &peer, &json),
                     Err(_) => r#"{"id":null,"error":{"code":"invalid_params","message":"request is not UTF-8"}}"#.into(),
                 }
@@ -322,6 +375,10 @@ impl Server {
     }
 }
 
+fn validate_len(n: usize) -> Option<usize> {
+    (n > 0 && n <= MAX_FRAME).then_some(n)
+}
+
 fn write_frame(w: &mut impl Write, b: &[u8]) -> std::io::Result<()> {
     w.write_all(&(b.len() as u32).to_be_bytes())?;
     w.write_all(b)?;
@@ -329,10 +386,7 @@ fn write_frame(w: &mut impl Write, b: &[u8]) -> std::io::Result<()> {
 }
 
 fn throw(env: &mut Env, msg: String) -> jni::errors::Result<()> {
-    env.throw_new(
-        jni_str!("java/lang/IllegalStateException"),
-        JNIString::from(msg),
-    )
+    env.throw_new(jni_str!("java/lang/IllegalStateException"), JNIString::from(msg))
 }
 
 fn lookup(handle: jlong) -> Option<Arc<Server>> {
@@ -349,10 +403,8 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_s
     unowned
         .with_env(|env| -> jni::errors::Result<jlong> {
             let cert = env.convert_byte_array(&cert_der)?;
-            let callback = Arc::new(Callback {
-                vm: env.get_java_vm()?,
-                obj: env.new_global_ref(callback)?,
-            });
+            let callback =
+                Arc::new(Callback { vm: env.get_java_vm()?, obj: env.new_global_ref(callback)? });
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let key = Arc::new(CertifiedKey::new(
                 vec![CertificateDer::from(cert)],
@@ -371,6 +423,8 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_s
                     callback,
                     listeners: Mutex::new(HashMap::new()),
                     connections: Arc::new(AtomicUsize::new(0)),
+                    open: Mutex::new(HashMap::new()),
+                    stopped: AtomicBool::new(false),
                 }),
             );
             Ok(handle)
@@ -418,13 +472,14 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_u
             let address = address.try_to_string(env)?;
             if let Some(server) = lookup(handle)
                 && let Ok(ip) = address.parse::<std::net::IpAddr>()
-                && let Some(stop) = server
-                    .listeners
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&SocketAddr::new(ip, port as u16).to_string())
             {
-                stop.store(true, Ordering::Relaxed);
+                let key = SocketAddr::new(ip, port as u16).to_string();
+                if let Some(stop) =
+                    server.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&key)
+                {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                server.close_listener_connections(&key);
             }
             Ok(())
         })
@@ -432,7 +487,9 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_u
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_connections<'caller>(
+pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_connections<
+    'caller,
+>(
     mut unowned: EnvUnowned<'caller>,
     _class: JClass<'caller>,
     handle: jlong,
@@ -453,16 +510,31 @@ pub extern "system" fn Java_io_github_franticplant_koiterminal_devd_DevdNative_s
     unowned
         .with_env(|_env| -> jni::errors::Result<()> {
             if let Some(server) = servers().remove(&handle) {
-                for (_, stop) in server
-                    .listeners
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .drain()
-                {
-                    stop.store(true, Ordering::Relaxed);
-                }
+                server.stop();
             }
             Ok(())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_length_boundaries() {
+        assert_eq!(validate_len(0), None);
+        assert_eq!(validate_len(1), Some(1));
+        assert_eq!(validate_len(MAX_FRAME), Some(MAX_FRAME));
+        assert_eq!(validate_len(MAX_FRAME + 1), None);
+    }
+
+    #[test]
+    fn frame_header_is_big_endian_length_then_payload() {
+        let mut out = Vec::new();
+        write_frame(&mut out, b"hello").unwrap();
+        assert_eq!(&out[..4], &5u32.to_be_bytes());
+        assert_eq!(&out[4..], b"hello");
+    }
 }

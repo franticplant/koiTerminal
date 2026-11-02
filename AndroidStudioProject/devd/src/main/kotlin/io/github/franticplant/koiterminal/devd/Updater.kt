@@ -48,7 +48,12 @@ class Updater(private val context: Context, private val log: DevdLog) {
         if (!sha256.matches(Regex("[0-9a-f]{64}")))
             throw ApiException(ErrorCode.INVALID_PARAMS, "sha256 must be 64 hex digits")
         upload?.file?.delete()
-        dir.listFiles()?.forEach { it.delete() }
+        // Keep APKs that a pending install record still refers to.
+        val protected = records()
+            .filter { it.getString("state") in setOf("installing", "pendingUserAction") }
+            .map { it.optString("apk") }
+            .toSet()
+        dir.listFiles()?.forEach { if (it.absolutePath !in protected) it.delete() }
         val id = UUID.randomUUID().toString()
         upload = Upload(id, File(dir, "$id.apk"), size, sha256)
         log.info("update", "upload $id begins: $size bytes")
@@ -96,7 +101,7 @@ class Updater(private val context: Context, private val log: DevdLog) {
         }
         val info = verify(u.file)
         upload = null
-        return install(u.file, info)
+        return install(u.file, info, id)
     }
 
     private fun current(id: String): Upload =
@@ -139,7 +144,7 @@ class Updater(private val context: Context, private val log: DevdLog) {
         return info
     }
 
-    private fun install(apk: File, info: PackageInfo): JSONObject {
+    private fun install(apk: File, info: PackageInfo, uploadId: String): JSONObject {
         val installer = context.packageManager.packageInstaller
         val params =
             PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
@@ -164,6 +169,7 @@ class Updater(private val context: Context, private val log: DevdLog) {
                 )
                 .put("state", "installing")
                 .put("startedMs", System.currentTimeMillis())
+                .put("uploadId", uploadId)
                 .put("apk", apk.absolutePath)
         save(record)
         log.info(
@@ -219,8 +225,25 @@ class Updater(private val context: Context, private val log: DevdLog) {
     fun status(): JSONArray {
         val all = records()
         var changed = false
+        // null means the session query failed: keep records nonterminal rather
+        // than guessing from package state.
+        val sessions: List<android.content.pm.PackageInstaller.SessionInfo>? =
+            try {
+                context.packageManager.packageInstaller.mySessions.toList()
+            } catch (e: Exception) {
+                null
+            }
         for (r in all) {
-            if (r.getString("state") != "installing") continue
+            if (r.getString("state") !in setOf("installing", "pendingUserAction")) continue
+            if (sessions == null) continue
+            val installId = r.optInt("installId", -1)
+            // A live session for this exact install is authoritative.
+            if (
+                sessions.any {
+                    it.sessionId == installId && (it.isActive || it.isCommitted)
+                }
+            )
+                continue
             val info = installed(r.getString("package"))
             val now = info?.longVersionCode
             val replaced =

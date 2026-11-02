@@ -103,14 +103,15 @@ class Pairings(context: Context, private val log: DevdLog) {
     }
 
     fun approve(req: PairingRequest, scopes: Set<String>, days: Int) {
-        // Consume the request first: a stale button must not recreate access after a revoke.
-        if (!_pending.compareAndSet(req, null))
-            throw ApiException(ErrorCode.FAILED, "this pairing request is no longer pending")
+        // Validate before consuming, so a bad selection leaves the request on screen. The
+        // compareAndSet still makes a stale approval unable to recreate access.
         if (days !in 1..365)
             throw ApiException(ErrorCode.INVALID_PARAMS, "days must be 1..365")
         val granted = scopes.intersect(Scope.ALL.toSet()).intersect(req.requestedScopes)
         if (granted.isEmpty())
             throw ApiException(ErrorCode.INVALID_PARAMS, "no requested scope was granted")
+        if (!_pending.compareAndSet(req, null))
+            throw ApiException(ErrorCode.FAILED, "this pairing request is no longer pending")
         val now = System.currentTimeMillis()
         val p = Pairing(req.clientId, req.name, granted, now, now + days * 86_400_000L)
         store(_all.value.filter { it.id != p.id } + p)

@@ -28,12 +28,22 @@ usage: koi-ctl [-a HOST:PORT] COMMAND [ARGS]
   methods [--all]         the methods this pairing may call (--all: every method)
   call METHOD [k=v | k:=JSON]...
                           call any method; prints the result as JSON
-  logs [-f] [--level L] [--grep TEXT]
-                          read devd's journal log; -f follows it
+  logs [devd|app] [-f] [--level L] [--grep TEXT]
+                          read devd's journal or the app's dev log; -f follows it
   update APK...           upload, verify and install builds (app and/or devd)
   journal                 verify devd's hash-chained journal against the anchor kept here,
                           then keep the current head as the new anchor
   top [--once]            live RAM/CPU of devd and the koiTerminal app
+  vm [status|start|stop|shutdown|reset]
+                          VM lifecycle and state
+  app [info|start|restart|exits]
+                          app process state and lifecycle
+  installer [status|install|upgrade|cancel|retry]
+                          guest-image install state and actions
+  image                   installed image metadata
+  config                  the installed vm_config.json
+  ports                   ports reported by the guest
+  doctor                  one pass over devd, packages, app, VM and installer
   forget                  drop the pinned devd certificate for the address
 
 The address comes from -a, else $KOI_ADDR, else the last one paired with.
@@ -61,10 +71,7 @@ impl Ctx {
 
     fn connect(&self) -> Result<Conn, String> {
         let pin = self.hosts.pin(&self.addr).ok_or_else(|| {
-            format!(
-                "not paired with {}; run: koi-ctl -a {} pair",
-                self.addr, self.addr
-            )
+            format!("not paired with {}; run: koi-ctl -a {} pair", self.addr, self.addr)
         })?;
         Conn::open(&self.addr, &self.identity()?, Some(pin)).map_err(|e| e.to_string())
     }
@@ -102,11 +109,7 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
     let addr = addr
         .or_else(|| hosts.default.clone())
         .ok_or("no address: pass -a HOST:PORT or set KOI_ADDR")?;
-    let addr = if addr.contains(':') {
-        addr
-    } else {
-        format!("{addr}:{DEFAULT_PORT}")
-    };
+    let addr = if addr.contains(':') { addr } else { format!("{addr}:{DEFAULT_PORT}") };
     let mut ctx = Ctx { addr, hosts };
 
     match cmd.as_str() {
@@ -135,6 +138,13 @@ fn run(mut args: Vec<String>) -> Result<ExitCode, String> {
             }
         }
         "logs" => logs(&ctx, &rest),
+        "vm" => group(&ctx, "vm", &rest, "status"),
+        "app" => group(&ctx, "app", &rest, "info"),
+        "installer" => group(&ctx, "installer", &rest, "status"),
+        "image" => show(&ctx, "image.info"),
+        "config" => show(&ctx, "config.get"),
+        "ports" => show(&ctx, "ports.list"),
+        "doctor" => doctor(&ctx),
         "update" => update(&ctx, &rest),
         "journal" => journal(&mut ctx),
         "top" => top(&ctx, rest.iter().any(|a| a == "--once")),
@@ -177,17 +187,10 @@ fn print_json(v: &Value) {
 
 fn pair(ctx: &mut Ctx, args: &[String]) -> Result<ExitCode, String> {
     let mut name = client_name();
-    let mut scopes: Vec<String> = [
-        "read",
-        "read.content",
-        "operate",
-        "secrets",
-        "lifecycle",
-        "scenario",
-        "update",
-    ]
-    .map(String::from)
-    .to_vec();
+    let mut scopes: Vec<String> =
+        ["read", "read.content", "operate", "secrets", "lifecycle", "scenario", "update"]
+            .map(String::from)
+            .to_vec();
     let mut repin = false;
     let mut i = 0;
     while i < args.len() {
@@ -211,11 +214,7 @@ fn pair(ctx: &mut Ctx, args: &[String]) -> Result<ExitCode, String> {
         i += 1;
     }
     let id = ctx.identity()?;
-    let pin = if repin {
-        None
-    } else {
-        ctx.hosts.pin(&ctx.addr)
-    };
+    let pin = if repin { None } else { ctx.hosts.pin(&ctx.addr) };
     let mut c = Conn::open(&ctx.addr, &id, pin).map_err(|e| e.to_string())?;
     let code = pairing_code(&c.server_cert, &id.cert_der);
     let server = sha256_hex(&c.server_cert);
@@ -242,30 +241,95 @@ fn pair(ctx: &mut Ctx, args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn show(ctx: &Ctx, method: &str) -> Result<ExitCode, String> {
+    let mut c = ctx.connect()?;
+    match c.call(method, json!({})) {
+        Ok(v) => {
+            print_json(&v);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn group(ctx: &Ctx, prefix: &str, args: &[String], default: &str) -> Result<ExitCode, String> {
+    if args.len() > 1 {
+        return Err(format!("{prefix}: unexpected argument {:?}", args[1]));
+    }
+    let action = args.first().map(String::as_str).unwrap_or(default);
+    let allowed = match prefix {
+        "vm" => ["status", "start", "stop", "shutdown", "reset"].as_slice(),
+        "app" => ["info", "start", "restart", "exits"].as_slice(),
+        "installer" => ["status", "install", "upgrade", "cancel", "retry"].as_slice(),
+        _ => [].as_slice(),
+    };
+    if !allowed.contains(&action) {
+        return Err(format!("{prefix}: unknown action {action} (try: {})", allowed.join(", ")));
+    }
+    show(ctx, &format!("{prefix}.{action}"))
+}
+
+fn doctor(ctx: &Ctx) -> Result<ExitCode, String> {
+    let mut c = ctx.connect()?;
+    let checks = [
+        ("devd.info", json!({})),
+        ("packages.list", json!({})),
+        ("app.info", json!({})),
+        ("vm.status", json!({})),
+        ("installer.status", json!({})),
+    ];
+    let mut failures = 0;
+    for (method, params) in checks {
+        match c.call(method, params) {
+            Ok(v) => {
+                println!("ok   {method}");
+                if method == "vm.status" || method == "installer.status" {
+                    print_json(&v);
+                    let name = if method == "vm.status" {
+                        v["vm"]["name"].as_str()
+                    } else {
+                        v["name"].as_str()
+                    };
+                    if name == Some("error") {
+                        failures += 1;
+                        println!("     ^ state is error");
+                    }
+                }
+            }
+            Err(e) => {
+                failures += 1;
+                println!("FAIL $method: {e}");
+            }
+        }
+    }
+    if failures == 0 {
+        println!("\nall checks answered");
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("\n{failures} check(s) failed");
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 fn status(ctx: &Ctx) -> Result<ExitCode, String> {
     let mut c = ctx.connect()?;
     let info = c.call("devd.info", json!({})).map_err(|e| e.to_string())?;
-    let pkgs = c
-        .call("packages.list", json!({}))
-        .map_err(|e| e.to_string())?;
+    let pkgs = c.call("packages.list", json!({})).map_err(|e| e.to_string())?;
     println!(
         "devd {} at {} · listening on {} · off at {}",
         info["version"].as_str().unwrap_or("?"),
         ctx.addr,
         info["listener"]["addresses"],
-        info["listener"]["offAtMs"]
-            .as_u64()
-            .map(fmt_time)
-            .unwrap_or_else(|| "-".into())
+        info["listener"]["offAtMs"].as_u64().map(fmt_time).unwrap_or_else(|| "-".into())
     );
     println!(
         "this client: {} · scopes {} · until {}",
         info["caller"]["name"],
         info["caller"]["scopes"],
-        info["caller"]["expiresMs"]
-            .as_u64()
-            .map(fmt_time)
-            .unwrap_or_default()
+        info["caller"]["expiresMs"].as_u64().map(fmt_time).unwrap_or_default()
     );
     for p in pkgs.as_array().into_iter().flatten() {
         if p["installed"].as_bool() == Some(true) {
@@ -347,26 +411,22 @@ fn methods(ctx: &Ctx, all: bool) -> Result<ExitCode, String> {
 
 fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
     let mut follow = false;
+    let mut source = "devd";
     let mut extra = Map::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-f" | "--follow" => follow = true,
+            "app" | "devd" => source = args[i].as_str(),
             "--level" => {
-                extra.insert(
-                    "level".into(),
-                    json!(args.get(i + 1).ok_or("--level needs a value")?),
-                );
+                extra
+                    .insert("level".into(), json!(args.get(i + 1).ok_or("--level needs a value")?));
                 i += 1;
             }
             "--grep" => {
-                extra.insert(
-                    "grep".into(),
-                    json!(args.get(i + 1).ok_or("--grep needs a value")?),
-                );
+                extra.insert("grep".into(), json!(args.get(i + 1).ok_or("--grep needs a value")?));
                 i += 1;
             }
-            "devd" => {}
             a => return Err(format!("logs: unknown argument {a}")),
         }
         i += 1;
@@ -377,10 +437,18 @@ fn logs(ctx: &Ctx, args: &[String]) -> Result<ExitCode, String> {
         let mut params = extra.clone();
         params.insert("after".into(), json!(after));
         params.insert("max".into(), json!(1000));
-        params.insert("kind".into(), json!("log"));
-        let r = c
-            .call("devd.logs", Value::Object(params))
-            .map_err(|e| e.to_string())?;
+        let method;
+        if source == "app" {
+            method = "app.logs";
+            // app.logs is a smaller ring and has no level/grep parameters.
+            params.remove("level");
+            params.remove("grep");
+            params.insert("max".into(), json!(500));
+        } else {
+            method = "devd.logs";
+            params.insert("kind".into(), json!("log"));
+        }
+        let r = c.call(method, Value::Object(params)).map_err(|e| e.to_string())?;
         if r["dropped"].as_u64().unwrap_or(0) > 0 {
             println!("[{} entries dropped by the journal]", r["dropped"]);
         }
@@ -410,6 +478,7 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         let sha = sha256_hex(&bytes);
         let mut c = ctx.connect()?;
+        c.set_read_timeout(Duration::from_secs(30));
         let t0 = Instant::now();
         let begin = c
             .call("update.begin", json!({ "size": bytes.len(), "sha256": sha }))
@@ -437,36 +506,58 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
             bytes.len() / 1024,
             t0.elapsed().as_secs_f64()
         );
-        let rec = c
-            .call("update.commit", json!({ "uploadId": upload }))
-            .map_err(|e| format!("{path}: {e}"))?;
-        let install_id = rec["installId"].as_i64().ok_or("no installId")?;
-        let self_update = rec["package"].as_str() == Some(DEVD_PACKAGE);
+        let commit = c.call("update.commit", json!({ "uploadId": upload }));
+        let mut uncertain = false;
+        let mut install_id = None;
+        let mut self_update = false;
+        match commit {
+            Ok(rec) => {
+                install_id = rec["installId"].as_i64();
+                self_update = rec["package"].as_str() == Some(DEVD_PACKAGE);
+            }
+            Err(e) if e.code == "local" => {
+                // The commit may have reached devd before the socket died (a
+                // devd self-update does exactly that). Reconnect and look the
+                // upload up; never replay the commit.
+                uncertain = true;
+                eprintln!("{path}: connection lost during commit; reconciling by upload id");
+            }
+            Err(e) => return Err(format!("{path}: {e}")),
+        }
         drop(c);
         let deadline = Instant::now() + Duration::from_secs(300);
         let mut told = false;
         loop {
             std::thread::sleep(Duration::from_millis(800));
             if Instant::now() > deadline {
+                let what = install_id
+                    .map(|id| format!("install {id}"))
+                    .unwrap_or_else(|| "the commit".into());
                 return Err(format!(
-                    "{path}: install {install_id} did not finish in 5 minutes"
+                    "{path}: {what} did not finish in 5 minutes (outcome unknown)"
                 ));
             }
             // A devd self-update ends devd mid-way; reconnect until it is back.
             let Ok(mut c) = ctx.connect() else {
                 continue;
             };
+            c.set_read_timeout(Duration::from_secs(10));
             let Ok(list) = c.call("update.status", json!({})) else {
                 continue;
             };
-            let Some(r) = list
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|r| r["installId"].as_i64() == Some(install_id))
-            else {
+            let Some(r) = list.as_array().into_iter().flatten().find(|r| {
+                if let Some(id) = install_id {
+                    r["installId"].as_i64() == Some(id)
+                } else {
+                    uncertain && r["uploadId"].as_str() == Some(upload.as_str())
+                }
+            }) else {
                 continue;
             };
+            if install_id.is_none() {
+                install_id = r["installId"].as_i64();
+                self_update = r["package"].as_str() == Some(DEVD_PACKAGE);
+            }
             match r["state"].as_str() {
                 Some("success") => {
                     println!(
@@ -506,23 +597,14 @@ fn update(ctx: &Ctx, apks: &[String]) -> Result<ExitCode, String> {
 /// same hash. Then records the current head as the new anchor.
 fn journal(ctx: &mut Ctx) -> Result<ExitCode, String> {
     let mut c = ctx.connect()?;
-    let v = c
-        .call("journal.verify", json!({}))
-        .map_err(|e| e.to_string())?;
+    let v = c.call("journal.verify", json!({})).map_err(|e| e.to_string())?;
     if v["ok"].as_bool() != Some(true) {
         println!("BROKEN chain: {}", v["brokenAt"].as_str().unwrap_or("?"));
         return Ok(ExitCode::FAILURE);
     }
-    println!(
-        "chain ok: {} entries (seq {}..{})",
-        v["entries"], v["firstSeq"], v["lastSeq"]
-    );
-    let anchor = ctx
-        .hosts
-        .pins
-        .get(&ctx.addr)
-        .map(|p| p["journalAnchor"].clone())
-        .filter(|a| a.is_object());
+    println!("chain ok: {} entries (seq {}..{})", v["entries"], v["firstSeq"], v["lastSeq"]);
+    let anchor =
+        ctx.hosts.pins.get(&ctx.addr).map(|p| p["journalAnchor"].clone()).filter(|a| a.is_object());
     let mut ok = true;
     if let Some(a) = anchor {
         let seq = a["seq"].as_u64().unwrap_or(0);
@@ -534,10 +616,7 @@ fn journal(ctx: &mut Ctx) -> Result<ExitCode, String> {
             );
         } else if seq > 0 {
             let r = c
-                .call(
-                    "devd.logs",
-                    json!({ "after": seq - 1, "max": 1, "kind": "all" }),
-                )
+                .call("devd.logs", json!({ "after": seq - 1, "max": 1, "kind": "all" }))
                 .map_err(|e| e.to_string())?;
             match r["entries"].as_array().and_then(|e| e.first()) {
                 Some(e) if e["seq"].as_u64() == Some(seq) && e["hash"].as_str() == Some(hash) => {
@@ -560,9 +639,7 @@ fn journal(ctx: &mut Ctx) -> Result<ExitCode, String> {
         println!("no anchor yet for {}; recording one", ctx.addr);
     }
     if ok {
-        let head = c
-            .call("journal.head", json!({}))
-            .map_err(|e| e.to_string())?;
+        let head = c.call("journal.head", json!({})).map_err(|e| e.to_string())?;
         if let Some(p) = ctx.hosts.pins.get_mut(&ctx.addr) {
             p["journalAnchor"] =
                 json!({ "seq": head["seq"], "hash": head["hash"], "atMs": now_ms() });
@@ -574,31 +651,24 @@ fn journal(ctx: &mut Ctx) -> Result<ExitCode, String> {
             head["hash"].as_str().unwrap_or("").get(..16).unwrap_or("")
         );
     }
-    Ok(if ok {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 fn top(ctx: &Ctx, once: bool) -> Result<ExitCode, String> {
     let mut c = ctx.connect()?;
     loop {
-        let m = c
-            .call("metrics.current", json!({}))
-            .map_err(|e| e.to_string())?;
+        let m = c.call("metrics.current", json!({})).map_err(|e| e.to_string())?;
         if !once {
             print!("\x1b[2J\x1b[H");
         }
         println!(
-            "{}  koi app: {}{}",
+            "{}  koi app: {}",
             fmt_time_ms(m["unixMs"].as_u64().unwrap_or(0)),
             if m["koiConnected"].as_bool() == Some(true) {
                 "connected"
             } else {
                 "(not bound: call app.start)"
             },
-            ""
         );
         println!(
             "\n{:<12} {:>7} {:>10} {:>10} {:>7} {:>8} {:>5}",
@@ -612,10 +682,7 @@ fn top(ctx: &Ctx, once: bool) -> Result<ExitCode, String> {
                 p["pid"],
                 kb("rssKb"),
                 kb("pssKb"),
-                p["cpuPct"]
-                    .as_f64()
-                    .map(|v| format!("{v:.1}"))
-                    .unwrap_or_else(|| "-".into()),
+                p["cpuPct"].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "-".into()),
                 p["threads"],
                 p["fds"]
             );
@@ -628,10 +695,7 @@ fn top(ctx: &Ctx, once: bool) -> Result<ExitCode, String> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// UTC "YYYY-MM-DD HH:MM", without a date library.
@@ -660,15 +724,7 @@ fn civil(ms: u64) -> (i64, u32, u32, u32, u32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = yoe + era * 400 + i64::from(m <= 2);
-    (
-        y,
-        m,
-        d,
-        (rem / 3600) as u32,
-        (rem % 3600 / 60) as u32,
-        (rem % 60) as u32,
-        (ms % 1000) as u32,
-    )
+    (y, m, d, (rem / 3600) as u32, (rem % 3600 / 60) as u32, (rem % 60) as u32, (ms % 1000) as u32)
 }
 
 #[cfg(test)]

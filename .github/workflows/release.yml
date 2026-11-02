@@ -74,15 +74,24 @@ jobs:
       - name: Rust tests and lints
         run: |
           scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
+          scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
           scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
 
+      - name: JVM tests and lint
+        run: |
+          scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain \
+            :devapi:testDebugUnitTest :devd:testDebugUnitTest :app:testDevDebugUnitTest \
+            lintDevRelease lintProdRelease :devd:lintRelease
+
       - name: Build unsigned APKs
+        env:
+          KOI_RELEASE_TAG: ${{ env.TAG }}
         run: scripts/build all
 
       - name: Release check (prod has no dev pieces)
-        run: scripts/run scripts/check-release-apk.sh AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
+        run: scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
       - name: Release check (devd)
-        run: scripts/run scripts/check-release-apk.sh --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+        run: scripts/run scripts/check-release-apk.sh --unsigned --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
 
       - name: Build koi-ctl
         run: scripts/ctl
@@ -112,7 +121,7 @@ jobs:
       - name: Checksums and SBOM
         run: |
           cp "$RUNNER_TEMP/sbom.spdx.json" "dist/koi-$TAG.spdx.json"
-          (cd dist && sha256sum koi-*.apk koi-ctl koi-*.spdx.json > SHA256SUMS)
+          (cd dist && sha256sum koi-* > SHA256SUMS)
           cat dist/SHA256SUMS
 
       - name: Attest build provenance

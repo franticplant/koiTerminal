@@ -61,6 +61,10 @@
             android:exported="false" />
 
         <receiver
+            android:name=".AutoOffReceiver"
+            android:exported="false" />
+
+        <receiver
             android:name=".RestoreReceiver"
             android:exported="false">
             <intent-filter>

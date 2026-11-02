@@ -42,21 +42,23 @@ jobs:
         run: scripts/run cargo clippy --manifest-path dev/ctl/Cargo.toml --all-targets --locked -- -D warnings
       - name: Rust tests (koi-ctl)
         run: scripts/run cargo test --manifest-path dev/ctl/Cargo.toml --locked
-      - name: Rust lints (devd native)
-        run: scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Rust lints and tests (devd native)
+        run: |
+          scripts/run cargo clippy --manifest-path AndroidStudioProject/devd-native/Cargo.toml --all-targets --locked -- -D warnings
+          scripts/run cargo test --manifest-path AndroidStudioProject/devd-native/Cargo.toml --locked
 
       - name: Build unsigned APKs (dev, prod, devd)
         run: scripts/build all
 
       - name: Kotlin unit tests and lint
-        run: scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain :app:testDevDebugUnitTest :devapi:testDebugUnitTest lintDevRelease lintProdRelease :devd:lintRelease
+        run: scripts/run ./AndroidStudioProject/gradlew -p AndroidStudioProject --console=plain :app:testDevDebugUnitTest :devapi:testDebugUnitTest :devd:testDebugUnitTest lintDevRelease lintProdRelease :devd:lintRelease
 
       - name: Release check (prod has no dev pieces)
-        run: scripts/run scripts/check-release-apk.sh AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
+        run: scripts/run scripts/check-release-apk.sh --unsigned AndroidStudioProject/app/build/outputs/apk/prod/release/*.apk
       - name: Release check, inverted (dev still trips it)
-        run: scripts/run scripts/check-release-apk.sh --expect-dev AndroidStudioProject/app/build/outputs/apk/dev/release/*.apk
+        run: scripts/run scripts/check-release-apk.sh --unsigned --expect-dev AndroidStudioProject/app/build/outputs/apk/dev/release/*.apk
       - name: Release check (devd)
-        run: scripts/run scripts/check-release-apk.sh --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
+        run: scripts/run scripts/check-release-apk.sh --unsigned --devd AndroidStudioProject/devd/build/outputs/apk/release/*.apk
 
       - name: Build koi-ctl
         run: scripts/ctl
@@ -113,8 +115,8 @@ jobs:
           KOI_KEY_ALIAS: ${{ vars.KOI_KEY_ALIAS }}
           KOI_CERT_SHA256: ${{ vars.KOI_CERT_SHA256 }}
         run: |
-          scripts/sign dev unsigned/*dev*.apk
-          scripts/sign devd unsigned/*devd*.apk
+          scripts/sign dev unsigned/app-dev-release-unsigned.apk
+          scripts/sign devd unsigned/devd-release-unsigned.apk
           rm -f "$RUNNER_TEMP/koi.p12"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

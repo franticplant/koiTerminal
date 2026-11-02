@@ -40,6 +40,7 @@ apk=${2:-$default_apk}
 export KOI_KEYSTORE_PASSWORD KOI_KEY_ALIAS KOI_KEY_PASSWORD
 
 pinned=${KOI_CERT_SHA256:-$(tr -d '[:space:]' < "$repo/dev/signing/koi-dev-cert.sha256")}
+pinned=$(printf '%s' "$pinned" | tr 'A-F' 'a-f')
 work=$(mktemp -d "${TMPDIR:-/tmp}/koi-sign.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 cp "$apk" "$work/in.apk"

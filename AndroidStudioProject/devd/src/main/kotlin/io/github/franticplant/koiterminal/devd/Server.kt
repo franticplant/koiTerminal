@@ -132,6 +132,8 @@ class Server(private val app: DevdApp) {
         if (!running) return
         running = false
         watcher?.interrupt()
+        // A pending approval must not outlive the listener that asked for it.
+        app.pairings.pending.value?.let { app.pairings.deny(it, "listener stopped") }
         for (key in listeners) app.log.info("listener", "closed $key")
         listeners.clear()
         if (native != 0L) DevdNative.stop(native)
@@ -160,6 +162,7 @@ class Server(private val app: DevdApp) {
     val binds: StateFlow<List<Bind>> = _binds
 
     /** Binds loopback and the enabled interfaces' IPv4 addresses; closes anything else. */
+    @Synchronized
     private fun reconcile() {
         val v = app.settings.values.value
         val up = ipv4Interfaces().toMap()
@@ -342,7 +345,15 @@ class Server(private val app: DevdApp) {
         val scopesRaw = raw.optJSONArray("scopes") ?: JSONArray(Scope.ALL)
         val scopes = (0 until scopesRaw.length()).map { scopesRaw.getString(it) }.toSet()
         val code = Tls.pairingCode(serverCert, conn.clientCert)
-        val req = app.pairings.request(clientId, name, scopes, code, conn.local, conn.peer)
+        // Admission and creation happen under the lifecycle monitor. stop() holds
+        // the same monitor while it disables `running` and denies the pending
+        // request, so a request cannot be published after the listener is off.
+        val req =
+            synchronized(this) {
+                if (!running)
+                    throw ApiException(ErrorCode.UNAVAILABLE, "the listener was stopped")
+                app.pairings.request(clientId, name, scopes, code, conn.local, conn.peer)
+            }
         app.notifications.pairingRequest(req)
         val result =
             try {

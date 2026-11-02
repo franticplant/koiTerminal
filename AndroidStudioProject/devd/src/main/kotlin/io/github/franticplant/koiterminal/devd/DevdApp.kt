@@ -20,8 +20,8 @@ class DevdApp : Application() {
     val server by lazy { Server(this) }
     val metrics by lazy { Metrics(this) }
 
-    /** Set when Android needs a tap before installing (first install of a package). */
-    @Volatile var pendingInstall: android.content.Intent? = null
+    /** install id + intent when Android needs a tap before installing. */
+    @Volatile var pendingInstall: Pair<Int, android.content.Intent>? = null
 
     internal val _offAtMs = MutableStateFlow<Long?>(null)
 

@@ -325,6 +325,63 @@ class DevdMethods(private val app: DevdApp) {
             app.hooks.get(15_000)
             result(app.hooks.call("app.info", JSONObject()))
         }
+
+        table.add(
+            method(
+                "app.restart",
+                Scope.LIFECYCLE,
+                "Ends the koiTerminal process and waits until it is back (a new pid). Refuses " +
+                    "while the VM or an install is active.",
+                true,
+                long(
+                    "timeoutMs",
+                    "How long to wait for the new process (default 20000).",
+                    min = 1000,
+                    max = 120_000,
+                ),
+            )
+        ) { p ->
+            val before = result(app.hooks.call("app.info", JSONObject())).getInt("pid")
+            val status = result(app.hooks.call("vm.status", JSONObject()))
+            val vm = status.getJSONObject("vm").optString("name")
+            if (vm !in setOf("ready", "stopped", "error"))
+                throw ApiException(ErrorCode.FAILED, "stop the VM before restarting the app")
+            val install = status.getJSONObject("install").optString("name")
+            if (install in setOf("installing", "suspended"))
+                throw ApiException(ErrorCode.FAILED, "finish the install before restarting the app")
+            try {
+                val reply = app.hooks.call("app.exit", JSONObject())
+                reply.optJSONObject("error")?.let {
+                    throw ApiException(it.getString("code"), it.getString("message"))
+                }
+            } catch (e: ApiException) {
+                // The reply is often lost because the process is gone; if it is
+                // an explicit refusal, surface it instead of polling to timeout.
+                if (e.code != ErrorCode.UNAVAILABLE)
+                    throw e
+            }
+            val t0 = System.currentTimeMillis()
+            val deadline = t0 + p.longOr("timeoutMs", 20_000)
+            var info: JSONObject? = null
+            while (System.currentTimeMillis() < deadline) {
+                Thread.sleep(300)
+                info =
+                    try {
+                        result(app.hooks.call("app.info", JSONObject()))
+                    } catch (e: ApiException) {
+                        null
+                    }
+                if (info != null && info.getInt("pid") != before) break
+                info = null
+            }
+            val newInfo =
+                info
+                    ?: throw ApiException(ErrorCode.TIMEOUT, "koiTerminal did not come back")
+            JSONObject()
+                .put("oldPid", before)
+                .put("newPid", newInfo.getInt("pid"))
+                .put("ms", System.currentTimeMillis() - t0)
+        }
     }
 
     private fun result(reply: JSONObject): JSONObject {

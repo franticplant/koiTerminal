@@ -131,8 +131,11 @@ class Metrics(private val app: DevdApp) {
                 p.optInt("fds", -1).takeIf { it >= 0 }?.let { add("$name.fds", now, it.toDouble()) }
                 val c = p.optLong("cpuMs", -1)
                 if (c >= 0) {
-                    cpu[name] = c
-                    val before = prev?.cpuMs?.get(name)
+                    // CPU time resets when a process is replaced; key by pid so a
+                    // restart does not look like a negative (or huge) delta.
+                    val cpuKey = "$name#${p.optInt("pid")}"
+                    cpu[cpuKey] = c
+                    val before = prev?.cpuMs?.get(cpuKey)
                     if (before != null && dt != null) {
                         // Percent of one core.
                         add("$name.cpuPct", now, ((c - before).coerceAtLeast(0) * 100.0 / dt))

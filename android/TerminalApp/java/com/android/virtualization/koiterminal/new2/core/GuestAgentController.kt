@@ -128,15 +128,16 @@ class GuestAgentController(
     }
 
     @Synchronized
-    fun shutdownVm() {
-        debianService?.shutdownDebian()
-    }
+    fun shutdownVm(): Boolean = debianService?.shutdownDebian() ?: false
 
-    fun resizeTtyWindow(target: Int, columns: Int, rows: Int) {
-        try {
-            koiService?.resizeTtyWindow(target, columns, rows)
+    fun resizeTtyWindow(target: Int, columns: Int, rows: Int): Boolean {
+        val service = koiService ?: return false
+        return try {
+            service.resizeTtyWindow(target, columns, rows)
+            true
         } catch (e: Exception) {
             Log.w(TAG, "Could not share updated tty window size with koiService.")
+            false
         }
     }
 
@@ -154,6 +155,14 @@ class GuestAgentController(
         portsStateManager.updateEnabledPort(port, enable)
         Log.d(TAG, "portsStateManager.updateEnabledPort($port, $enable)")
     }
+
+    /** Whether the guest agent service is up and able to take shutdown calls. */
+    val ready: Boolean
+        get() = debianService != null
+
+    /** Whether the koi-specific guest service is available for tty resize/time calls. */
+    val koiReady: Boolean
+        get() = koiService != null
 
     private fun updatePortsState() {
         val activePorts = portsStateManager.getActivePorts()

@@ -13,3 +13,4 @@ AndroidStudioProject/keystore.jks
 dist/
 dev/keystore.env
 !dev/ctl/Cargo.lock
+.m2/
