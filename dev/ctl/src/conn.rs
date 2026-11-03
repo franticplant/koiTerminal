@@ -169,6 +169,14 @@ impl Conn {
 
     /// Calls `method` and returns its result, or devd's error.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        self.send(method, params)?;
+        self.recv()
+    }
+
+    /// Sends a request without waiting for its reply. devd answers the
+    /// requests on one connection in order, so several can be in flight; read
+    /// each reply with [`Conn::recv`].
+    pub fn send(&mut self, method: &str, params: Value) -> Result<(), CallError> {
         let id = self.next_id;
         self.next_id += 1;
         let req = json!({ "id": id, "method": method, "params": params });
@@ -177,8 +185,12 @@ impl Conn {
         let io = |e: std::io::Error| local(format!("connection: {e}"));
         self.stream.write_all(&len.to_be_bytes()).map_err(io)?;
         self.stream.write_all(&bytes).map_err(io)?;
-        self.stream.flush().map_err(io)?;
+        self.stream.flush().map_err(io)
+    }
 
+    /// Reads the next reply: its result, or devd's error.
+    pub fn recv(&mut self) -> Result<Value, CallError> {
+        let io = |e: std::io::Error| local(format!("connection: {e}"));
         let mut hdr = [0u8; 4];
         self.stream.read_exact(&mut hdr).map_err(io)?;
         let n = u32::from_be_bytes(hdr) as usize;
